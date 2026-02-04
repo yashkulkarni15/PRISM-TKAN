@@ -1,0 +1,21 @@
+# PyCaret Automation Script Requirements
+
+# Core ML
+pycaret>=3.0.0
+pandas>=1.5.0
+numpy>=1.23.0
+scikit-learn>=1.0.0
+
+# Gradient Boosting Models
+lightgbm>=3.3.0
+
+# GUI
+gradio>=4.0.0
+
+# XAI Tools
+shap>=0.42.0
+lime>=0.2.0
+
+# Visualization
+matplotlib>=3.6.0
+pillow>=9.0.0

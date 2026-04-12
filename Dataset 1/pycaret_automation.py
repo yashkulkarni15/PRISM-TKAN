@@ -15,12 +15,12 @@ warnings.filterwarnings('ignore')
 import os
 os.environ['LOKY_MAX_CPU_COUNT'] = '2'  # Limit parallel jobs
 
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend – MUST be before pyplot import
+import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import gradio as gr
-import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
 
 # PyCaret
 from pycaret.classification import ClassificationExperiment
@@ -118,10 +118,10 @@ def run_analysis(file, target_column):
             system_log=False,
             n_jobs=1,  # Single thread to reduce CPU usage
             train_size=0.8,  # Use 80% for training
-            fold=3  # Reduce cross-validation folds
+            fold=5  # Reduce cross-validation folds
         )
         
-        # Define 10 models to compare (using faster models only)
+        # Define 10 models to comparex
         models_to_compare = [
             'lr',      # Logistic Regression
             'knn',     # K-Neighbors Classifier

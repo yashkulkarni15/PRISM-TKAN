@@ -18,6 +18,7 @@ venv/
 .DS_Store
 
 # Data + generated artifacts (team can adjust later)
+python-version.py
 
 # Keep placeholders
 !data/raw/.gitkeep

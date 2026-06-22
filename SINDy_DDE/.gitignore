@@ -1,0 +1,71 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+.venv*/
+venv/
+venv_*/
+venv_pycaret/
+venv_old/
+.env/
+
+# Jupyter
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# Editor/OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Data + generated artifacts (team can adjust later)
+python-version.py
+*.zip
+*.pkl
+*.joblib
+*.ubj
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.log
+logs/
+mlruns/
+outputs/
+checkpoints/
+artifacts/
+xgb_results*/
+sindy_pipeline/logs/
+sindy_pipeline/preprocessed/
+sindy_pipeline/sindy_fits/
+sindy_pipeline/sindy_analysis/
+sindy_pipeline/*.log
+data/phase2_signals/
+phase2_signals/
+phase2_psd_js*/
+phase2_js_curves*/
+phase2_psd_profiles*/
+phase2_5_noise_metrics*/
+phase2_5_calibration*/
+results/
+archive/
+!archive/MANIFEST.md
+*.png
+*.svg
+*.npz
+
+# Local-only scratch and dataset copies (not part of the project)
+Dataset 1/
+Dataset 2/
+Dataset\ 1/
+Dataset\ 2/
+
+# Keep placeholders
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!notebooks/.gitkeep
+!src/.gitkeep
+!results/.gitkeep
+!docs/.gitkeep

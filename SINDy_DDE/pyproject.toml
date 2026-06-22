@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pri2m"
+version = "0.1.0"
+description = "PRI2M Phase 1-3 research utilities"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "pandas",
+  "scipy",
+  "PyYAML",
+  "h5py",
+  "PyWavelets",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+rapidminer = [
+  "scikit-learn",
+  "xgboost",
+]
+phase3 = [
+  "torch",
+  "mlflow",
+  "captum",
+  "shap",
+  "dice-ml",
+  "matplotlib",
+]
+sigkan = [
+  "iisignature",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

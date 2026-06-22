@@ -1,0 +1,97 @@
+project:
+  name: PRI2M
+  date_context: "2026-05-13"
+  phase1_due: "2026-05-14"
+  phase2_start: "2026-05-15"
+  phase3_start: "2026-05-22"
+
+paths:
+  local_root: "/Users/yash/Downloads/PRI2M/SINDy_DDE"
+  great_lakes_root: "/nfs/turbo/coe-jaabell/PRI2M/SINDy_DDE"
+  great_lakes_sindy: "/nfs/turbo/coe-jaabell/PRI2M/SINDy_DDE/sindy_pipeline"
+  digital_machining_data: "/nfs/turbo/coe-jaabell/datasets/tonylschmitz/digital-machining-database/versions/10"
+  mlflow_tracking_uri: "file:/nfs/turbo/coe-jaabell/PRI2M/SINDy_DDE/results/mlruns"
+
+hpc_sync:
+  keep_full_preprocessed_on_hpc: true
+  required_source_files:
+    - "read_file.py"
+    - "RMSsliding.py"
+    - "build_state.py"
+    - "sindy_dde.py"
+  lightweight_outputs:
+    - "preprocessed_log.csv"
+    - "rejection_log.csv"
+    - "sindy_fit_failures.csv"
+    - "sindy_fits/dataset_*.csv"
+    - "sindy_analysis/*.csv"
+    - "sindy_analysis/*.png"
+    - "sindy_analysis/*.pdf"
+    - "sindy_analysis/*.svg"
+  expected:
+    preprocessed_rows: 32168
+    datasets: 120
+    fit_failures: 0
+
+datasets:
+  phase3_dev: [1, 4, 29, 35, 39, 91]
+  psd_anomaly_sanity: [11, 12, 34, 35, 44, 45, 46, 47, 48]
+  noisy_mirrors:
+    clean_1:
+      one_percent: 61
+      five_percent: 91
+
+altintas_budak:
+  may14_target: "textbook verifier scaffold plus textbook smoke check"
+  may15_target: "five-dataset blim validation"
+  acceptance:
+    textbook_lobe_reproduction: true
+    blim_validation_tolerance_pct: 10.0
+    min_validation_datasets: 5
+    span_cut_directions: true
+
+psd:
+  signals: ["xtpos", "ytpos", "Forcex", "Forcey"]
+  downstream_loss_signals: ["xtpos", "Forcex"]
+  welch:
+    window: "hann"
+    nperseg: 2048
+    overlap_fraction: 0.5
+    detrend: "constant"
+    min_nperseg: 256
+    short_signal_policy: "largest_power_of_two_at_least_min"
+  band:
+    low_hz: 0.0
+    high_multiplier_tpf: 5.0
+  divergence:
+    loss_candidate: "jensen_shannon"
+    posthoc_metrics: ["kl_stable_to_unstable", "kl_unstable_to_stable"]
+    bootstrap_ci: true
+  sanity_criteria:
+    stable: "clean tpf peak with low broadband noise"
+    unstable: "chatter-frequency peak near fn or broadband lift across chatter band"
+    overcalled_44_48: "partial chatter signature expected if signal-level physics explains overcalling"
+  report_plot:
+    type: "js_divergence_vs_b_over_blim"
+    facets: ["teeth", "cut_dir"]
+    show_bootstrap_ribbon: true
+
+phase3:
+  unlock_order:
+    - "hardcoded_tau_mlp_mse"
+    - "residual_physics"
+    - "tkan_architecture"
+    - "js_spectral_loss"
+    - "learnable_tau"
+  trajectory_gate:
+    stable_dataset: 1
+    unstable_dataset: 1
+    min_r2: 0.85
+    chatter_onset_tolerance_pct: 5.0
+    max_regression_r2_drop: 0.03
+  mlflow:
+    tracking_uri: "file:/nfs/turbo/coe-jaabell/PRI2M/SINDy_DDE/results/mlruns"
+    retention:
+      keep_best_by: "val_loss"
+      keep_final_epoch: true
+      delete_intermediate_periodic_checkpoints: true

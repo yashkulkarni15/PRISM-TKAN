@@ -1,0 +1,8 @@
+{
+  "name": "Python Data Science",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:1": {}
+  },
+  "postCreateCommand": "pip install pandas numpy matplotlib seaborn scikit-learn joblib jupytext"
+}

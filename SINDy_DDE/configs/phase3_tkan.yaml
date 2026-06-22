@@ -1,0 +1,62 @@
+# Phase 3 TKAN training config.
+#
+# Consumed by scripts/train_phase3.py to build a TrainConfig. CLI flags
+# (--model, --fold, --smoke, ...) override the values here. The MLflow tracking
+# URI is a `file:` store (quota-safe, no server needed on Great Lakes); the
+# filesystem backend opt-out (MLFLOW_ALLOW_FILE_STORE) is handled in the trainer.
+model: tkan
+epochs: 20
+# Warmup PEAK of the cosine schedule below (not a fixed lr). Halved from 0.003
+# after GL job 51651316 (fold 0): every epoch at effective lr >= ~0.0015 either
+# blew up or skipped non-finite batches (epoch 9: 1661/3334 skipped), while
+# every epoch after the cosine decayed below ~0.0015 trained clean (0 skips).
+# 0.0015 puts the whole schedule at or below the observed stable ceiling.
+lr: 0.0015
+# A40 bench: the TKAN recurrence is kernel-launch-bound, so per-batch time is
+# ~flat from B=32->256 while throughput rises ~8x. Big batch is the cheap win.
+batch_size: 256
+seed: 0
+hidden_size: 64
+num_layers: 1
+grid_size: 5
+spline_order: 3
+# Average-pool the window 1024->256 (x4) before the TKAN recurrence: cost is
+# linear in sequence length, so this is a ~4x speedup. Ignored by the MLP
+# baseline (which was trained at batch 32 / lr 0.001 / no pooling).
+pool: 4
+# torch.compile the recurrent KAN-GRU cell: fuses the launch-bound elementwise/
+# spline kernels -> measured ~3.4x faster per batch on an A40 (~77 -> ~22 min/
+# epoch), identical math. CUDA-only; a no-op on CPU. Pass --no-compile to disable.
+compile: true
+# Optimizer stability bundle -- fold-0 at lr 0.003 with plain fixed-lr Adam was
+# unstable: train_loss bounced (84->44->...->6.7->...->7.4) and val AUC swung
+# 0.69-0.88, peaking at epoch 6 without ever sustaining. Loss spikes on the
+# recurrent KAN-GRU are gradient blowups, hence: 2-epoch linear warmup into the
+# 0.003 peak, cosine decay over the remaining epochs, a global grad-norm clip,
+# and AdamW with a small decoupled weight decay on the spline weights.
+lr_schedule: cosine
+warmup_epochs: 2
+grad_clip: 1.0
+optimizer: adamw
+weight_decay: 1.0e-4
+# Gao et al. (JMSE 2025): concatenating scalar process params as a side branch
+# raised chatter-classification accuracy AND stabilized training. Side features
+# here are omega/tpf/tau, normalized with TRAIN-fold stats baked into the
+# checkpoint; b/b_mm/blim are forbidden at the model level because the label is
+# b/blim. Flag-gated (--no-side-input) for a clean with/without ablation;
+# ignored by the MLP baseline (the side-free control).
+side_input: true
+side_hidden: 16
+
+window:
+  length: 1024
+  stride: 512
+
+loss:
+  w_sev: 1.0
+  w_reg: 1.0
+  w_cls: 1.0
+  w_traj: 0.0
+
+mlflow:
+  tracking_uri: "file:results/phase3/mlruns"

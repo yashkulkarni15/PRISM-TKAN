@@ -40,6 +40,15 @@
 # A single fold (smoke first to confirm timing before all 5):
 #   sbatch --array=0 --export=ALL slurm/phase3_train_gpu.sbatch
 #
+# EXTRA_ARGS forwards arbitrary flags to scripts/train_phase3.py verbatim, so an
+# ablation needs no edit here. The side-input ablation, all 5 folds:
+#   env EXTRA_ARGS="--no-side-input" sbatch --export=ALL slurm/phase3_train_gpu.sbatch
+# Multiple flags are whitespace-separated (each word becomes its own argv entry):
+#   env EXTRA_ARGS="--no-side-input --side-hidden 32" \
+#       sbatch --export=ALL slurm/phase3_train_gpu.sbatch
+# Note: EXTRA_ARGS is split on whitespace only, so an individual argument cannot
+# itself contain a space. Unset/empty -> the invocation is exactly as it was.
+#
 # Partition MUST be spgpu (A40 / sm_86). The `gpu` partition is V100 (sm_70),
 # which the prism torch build has no kernels for -> instant crash. spgpu access
 # under jaabell0 is confirmed.
@@ -65,6 +74,10 @@ DEVICE="${DEVICE:-cuda}"
 # the GPU trains; keep <= cpus-per-task.
 NUM_WORKERS="${NUM_WORKERS:-4}"
 SMOKE="${SMOKE:-0}"
+# Generic passthrough: whitespace-separated extra flags appended verbatim to the
+# train_phase3.py invocation (e.g. "--no-side-input", "--severity-mode quantile").
+# Empty by default -> argv is byte-identical to the validated runs.
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 cd "$PROJECT_ROOT"
 
@@ -91,6 +104,7 @@ echo "Folds JSON:$FOLDS_JSON"
 echo "Output:    $OUTPUT_DIR"
 echo "MLflow:    $MLFLOW_URI"
 echo "Smoke:     $SMOKE"
+echo "Extra args:${EXTRA_ARGS:-(none)}"
 echo "GPU(s):    ${CUDA_VISIBLE_DEVICES:-none}"
 echo "Started:   $(date)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || true
@@ -98,6 +112,16 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || tr
 SMOKE_FLAG=()
 if [[ "$SMOKE" == "1" || "$SMOKE" == "true" || "$SMOKE" == "TRUE" ]]; then
   SMOKE_FLAG=(--smoke)
+fi
+
+# Split EXTRA_ARGS into separate argv entries. `read -r -a` splits on IFS
+# whitespace ONLY -- unlike an unquoted $EXTRA_ARGS it performs no pathname
+# expansion, so a flag value containing *, ? or [ ] cannot silently explode into
+# a list of filenames from the project root. Left empty when EXTRA_ARGS is unset,
+# so "${EXTRA_ARGS_ARR[@]}" expands to nothing (same idiom as SMOKE_FLAG above).
+EXTRA_ARGS_ARR=()
+if [[ -n "$EXTRA_ARGS" ]]; then
+  read -r -a EXTRA_ARGS_ARR <<< "$EXTRA_ARGS"
 fi
 
 echo "--- Training $MODEL fold $FOLD on $DEVICE ---"
@@ -112,6 +136,7 @@ python scripts/train_phase3.py \
   --mlflow-uri "$MLFLOW_URI" \
   --device "$DEVICE" \
   --num-workers "$NUM_WORKERS" \
-  "${SMOKE_FLAG[@]}"
+  "${SMOKE_FLAG[@]}" \
+  "${EXTRA_ARGS_ARR[@]}"
 
 echo "Finished: $(date)"

@@ -80,8 +80,12 @@ are directly comparable to the in-distribution sweep numbers. `n_excluded = 0` o
 
 ## Still open
 
-- **126–155 clean replication eval** (126≡1 … 155≡30) — not in job `51949469`; run it (or
-  confirm it was deprioritized) for the replication half of the held-out story.
+- **126–155 clean replication eval** (126≡1 … 155≡30) — **BLOCKED on a data-format change, not
+  code.** The newer Kaggle release ships these clean datasets in a reduced `(N,4)` H5 layout (2
+  non-oscillating channels, zero-padded, omega/b as leading columns) incompatible with the standard
+  17-col / 4-channel pipeline. (121–125 are standard `(45120,17)`, so the numbers above are sound.)
+  *To finish later:* request 126–155 from the data owner in the standard 17-column format, then the
+  same `eval_heldout_phase3.py` sweep runs unchanged.
 - **Calibration** of the operating threshold if a held-out *accuracy* number is wanted.
 - Source JSONs: `results/phase3/heldout/<run>_{121_125,122_125}.json` (gitignored — numbers
   preserved in this tracked doc).

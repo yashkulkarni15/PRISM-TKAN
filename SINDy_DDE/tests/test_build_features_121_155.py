@@ -150,12 +150,24 @@ def test_pure_derivations_negative_blim():
     assert np.isclose(out["tau"], 1.0 / (1000.0 / 60.0 * 4))
 
 
-def test_blim_interp_extrapolation_clamps():
-    # np.interp clamps outside the grid to the endpoints.
+def test_blim_interp_linear_extrapolation():
+    # Outside the grid the limit is LINEARLY EXTRAPOLATED, not clamped -- this
+    # is how the original feature CSVs got negative low-speed limits, and the
+    # held-out labels must match. slope = (0.003-0.001)/(4000-2000) = 1e-6 /rpm.
     sb_omega = np.array([2000.0, 4000.0])
     sb_blim_m = np.array([0.001, 0.003])
-    assert np.isclose(MOD.derive_blim_mm(sb_omega, sb_blim_m, 1000.0), 1.0)  # clamp low
-    assert np.isclose(MOD.derive_blim_mm(sb_omega, sb_blim_m, 9000.0), 3.0)  # clamp high
+    assert np.isclose(MOD.derive_blim_mm(sb_omega, sb_blim_m, 3000.0), 2.0)   # interior
+    assert np.isclose(MOD.derive_blim_mm(sb_omega, sb_blim_m, 500.0), -0.5)   # extrap low -> negative
+    assert np.isclose(MOD.derive_blim_mm(sb_omega, sb_blim_m, 9000.0), 8.0)   # extrap high
+
+
+def test_blim_interp_sorts_unsorted_boundary():
+    # The raw H5 columns are not guaranteed monotonic; the loader must sort
+    # before interpolating or np.interp returns garbage on descending x.
+    sb_omega = np.array([4000.0, 2000.0])      # descending
+    sb_blim_m = np.array([0.003, 0.001])
+    assert np.isclose(MOD.derive_blim_mm(sb_omega, sb_blim_m, 3000.0), 2.0)
+    assert np.isclose(MOD.derive_blim_mm(sb_omega, sb_blim_m, 500.0), -0.5)
 
 
 def test_parse_datasets():

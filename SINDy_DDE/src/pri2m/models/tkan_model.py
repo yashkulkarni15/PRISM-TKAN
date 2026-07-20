@@ -136,6 +136,8 @@ class TKANModel(nn.Module):
         side_input: bool = False,
         side_features: Sequence[str] = DEFAULT_SIDE_FEATURES,
         side_hidden: int = 16,
+        severity_mode: str = "huber",
+        severity_quantiles: Sequence[float] = (0.1, 0.5, 0.9),
     ) -> None:
         super().__init__()
         self.input_size = int(input_size)
@@ -147,6 +149,8 @@ class TKANModel(nn.Module):
         self.side_input = bool(side_input)
         self.side_features = tuple(str(f) for f in side_features)
         self.side_hidden = int(side_hidden)
+        self.severity_mode = str(severity_mode)
+        self.severity_quantiles = tuple(float(q) for q in severity_quantiles)
 
         self.encoder = TKANEncoder(
             input_size=self.input_size,
@@ -180,7 +184,12 @@ class TKANModel(nn.Module):
             self.register_buffer("side_std", torch.ones(n_side))
             severity_width += self.side_hidden
 
-        self.severity = SeverityHead(severity_width, use_kan=use_kan_heads)
+        self.severity = SeverityHead(
+            severity_width,
+            use_kan=use_kan_heads,
+            severity_mode=self.severity_mode,
+            quantiles=self.severity_quantiles,
+        )
         if self.with_trajectory:
             self.trajectory = TrajectoryHead(
                 self.hidden_size, len(self.traj_channels), use_kan=use_kan_heads

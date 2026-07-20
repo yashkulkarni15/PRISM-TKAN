@@ -52,6 +52,10 @@ from pri2m.data.phase3_sequence import (  # noqa: E402
 from pri2m.models.tkan_model import DEFAULT_SIDE_FEATURES, TKANModel  # noqa: E402
 from pri2m.xai import attribution, kan_native  # noqa: E402
 
+# Fallback levels for a quantile checkpoint whose run manifest lost its
+# ``severity`` block -- must track ``SeverityHead``'s own default.
+_DEFAULT_SEVERITY_QUANTILES = (0.1, 0.5, 0.9)
+
 
 def _infer_dims(state_dict: dict) -> dict:
     """Infer ``input_size``/``hidden_size``/``num_layers`` from a TKAN state_dict.
@@ -122,6 +126,13 @@ def _load_model(
     from the run's ``preprocessing.json`` ``side.features`` block, falling back
     to :data:`DEFAULT_SIDE_FEATURES` (with a stderr warning) when absent.
     Non-side checkpoints take exactly the old construction path.
+
+    Quantile-severity checkpoints are detected the same way: the severity head's
+    output width ``Q = severity.reg_head.base_weight.shape[0]`` is > 1, so the
+    default point head would fail ``load_state_dict`` with a size mismatch. The
+    LEVELS are not recoverable from the state_dict (only their count), so they
+    come from the run's ``preprocessing.json`` ``severity.quantiles`` block,
+    falling back to :data:`_DEFAULT_SEVERITY_QUANTILES` with a stderr warning.
     """
     state_dict = torch.load(checkpoint, map_location="cpu", weights_only=True)
     dims = _infer_dims(state_dict)
@@ -156,6 +167,33 @@ def _load_model(
             "side_hidden": side_hidden,
         }
 
+    severity_kwargs: dict = {}
+    n_quantiles = int(state_dict["severity.reg_head.base_weight"].shape[0])
+    if n_quantiles > 1:
+        severity_block = (preprocessing or {}).get("severity") or {}
+        if severity_block.get("quantiles"):
+            quantiles = tuple(float(q) for q in severity_block["quantiles"])
+        else:
+            quantiles = tuple(_DEFAULT_SEVERITY_QUANTILES)
+            print(
+                "WARNING: quantile-severity checkpoint but no 'severity' block "
+                "in preprocessing.json -- assuming quantiles="
+                f"{quantiles}. If the run used different levels, the predicted "
+                "intervals will be MISLABELLED.",
+                file=sys.stderr,
+            )
+        if len(quantiles) != n_quantiles:
+            raise ValueError(
+                f"quantile-level count mismatch: checkpoint expects "
+                f"{n_quantiles} levels (severity.reg_head.base_weight is "
+                f"[{n_quantiles}, ...]) but preprocessing.json names "
+                f"{len(quantiles)}: {quantiles}"
+            )
+        severity_kwargs = {
+            "severity_mode": "quantile",
+            "severity_quantiles": quantiles,
+        }
+
     model = TKANModel(
         input_size=input_size,
         hidden_size=hidden_size,
@@ -163,6 +201,7 @@ def _load_model(
         grid_size=args.grid_size,
         spline_order=args.spline_order,
         **side_kwargs,
+        **severity_kwargs,
     )
     model.load_state_dict(state_dict)
     model.eval()

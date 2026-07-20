@@ -42,7 +42,7 @@ os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 from pri2m.config import load_config
 from pri2m.data.phase3_sequence import NormStats, WindowConfig, build_fold_loaders
 from pri2m.models.baseline import MLPBaseline
-from pri2m.models.heads import Phase3Model
+from pri2m.models.heads import _VALID_SEVERITY_MODES, Phase3Model
 from pri2m.models.tkan_model import DEFAULT_SIDE_FEATURES, TKANModel
 from pri2m.training.losses import LossWeights, total_loss
 from pri2m.training.metrics import per_file_severity_metrics, trajectory_gate_report
@@ -119,6 +119,13 @@ class TrainConfig:
     side_input: bool = False
     # Width of the side-branch MLP output (ignored unless side_input is True).
     side_hidden: int = 16
+    # Severity-head regression mode: {"huber","quantile"} (tkan/sigkan only).
+    # "huber" is the validated point head; "quantile" emits one column per level
+    # in ``severity_quantiles`` and routes the regression term through the
+    # pinball loss (see pri2m.training.losses.severity_loss).
+    severity_mode: str = "huber"
+    # Quantile levels for severity_mode="quantile" (ignored in "huber" mode).
+    severity_quantiles: tuple[float, ...] = (0.1, 0.5, 0.9)
 
     def effective_epochs(self) -> int:
         """Epoch count after the smoke clamp."""
@@ -233,6 +240,12 @@ def build_model(cfg: TrainConfig) -> Phase3Model:
     ``cfg.side_input`` enables the Gao-style process-parameter side branch on
     the TKAN models only; requesting it for ``"mlp"`` raises ``ValueError`` so
     the MLP baseline comparison stays untouched.
+
+    ``cfg.severity_mode`` selects the severity head: ``"huber"`` (default) is
+    the validated point regression, ``"quantile"`` emits one column per level in
+    ``cfg.severity_quantiles`` and is trained with the pinball loss. Like
+    ``side_input`` it is a TKAN-only feature -- requesting it for ``"mlp"``
+    raises ``ValueError``, as does an unknown mode string.
     """
     window = cfg.effective_window()
     n_channels = len(window.channels)
@@ -242,6 +255,17 @@ def build_model(cfg: TrainConfig) -> Phase3Model:
         raise ValueError(
             f"side_input is implemented for tkan/sigkan only (the MLP baseline "
             f"is the side-free control); got model={cfg.model!r}"
+        )
+
+    if cfg.severity_mode not in _VALID_SEVERITY_MODES:
+        raise ValueError(
+            f"unknown severity_mode {cfg.severity_mode!r}; expected one of "
+            f"{set(_VALID_SEVERITY_MODES)}"
+        )
+    if cfg.severity_mode == "quantile" and model_name not in _TKAN_MODELS:
+        raise ValueError(
+            f"severity_mode='quantile' is implemented for tkan/sigkan only (the "
+            f"MLP baseline has a point severity head); got model={cfg.model!r}"
         )
 
     if model_name in _TKAN_MODELS:
@@ -256,6 +280,8 @@ def build_model(cfg: TrainConfig) -> Phase3Model:
             pool=cfg.pool,
             side_input=cfg.side_input,
             side_hidden=cfg.side_hidden,
+            severity_mode=cfg.severity_mode,
+            severity_quantiles=cfg.severity_quantiles,
         )
     if model_name == "mlp":
         return MLPBaseline(
@@ -793,6 +819,11 @@ def _build_preprocessing(
     ``"side"`` block with the feature names + stats. The key is ABSENT when the
     side branch is off -- downstream XAI detects side checkpoints by its
     presence.
+
+    A non-default ``cfg.severity_mode`` adds a ``"severity"`` block
+    (``{"mode", "quantiles"}``) for the same reason: the mode changes the
+    severity head's output width, so a checkpoint cannot be rebuilt without it.
+    The key is likewise ABSENT for the default point head.
     """
     window = cfg.effective_window()
     payload = {
@@ -820,6 +851,16 @@ def _build_preprocessing(
             "features": list(DEFAULT_SIDE_FEATURES),
             "mean": [float(v) for v in mean],
             "std": [float(v) for v in std],
+        }
+    if cfg.severity_mode != "huber":
+        # A non-default severity head changes the head's OUTPUT WIDTH, so a
+        # checkpoint cannot be rebuilt without knowing the mode and the exact
+        # quantile levels (the levels are unrecoverable from the state_dict --
+        # only their count is). Absent == the default point head, mirroring how
+        # the "side" block marks side-input checkpoints.
+        payload["severity"] = {
+            "mode": cfg.severity_mode,
+            "quantiles": [float(q) for q in cfg.severity_quantiles],
         }
     return payload
 
@@ -946,6 +987,8 @@ def train_one_fold(
                 "with_trajectory": cfg.with_trajectory,
                 "side_input": cfg.side_input,
                 "side_hidden": cfg.side_hidden,
+                "severity_mode": cfg.severity_mode,
+                "severity_quantiles": list(cfg.severity_quantiles),
                 "device": str(device),
                 "num_workers": cfg.num_workers,
             }

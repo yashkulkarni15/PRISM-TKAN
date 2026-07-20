@@ -181,12 +181,44 @@ def static_params_from_xlsx(xlsx_path, sheet_name="Sheet1"):
 # Pure derivations (NO H5 needed)
 # ----------------------------------------------------------------------
 
+def _interp_extrap(x, xp, fp):
+    """Linear interpolation with linear *extrapolation* beyond the endpoints.
+
+    ``xp`` must be sorted ascending. Inside the grid this is ``np.interp``;
+    outside, it continues the slope of the nearest interval (matching
+    ``scipy.interp1d(kind="linear", fill_value="extrapolate")``). This is the
+    convention the original feature CSVs used, so low-speed rows below the
+    boundary grid get the (often negative) extrapolated limit rather than the
+    clamped endpoint ``np.interp`` would return.
+    """
+    if xp.size == 0:
+        return float("nan")
+    if xp.size == 1:
+        return float(fp[0])
+    if x <= xp[0]:
+        return float(fp[0] + (fp[1] - fp[0]) / (xp[1] - xp[0]) * (x - xp[0]))
+    if x >= xp[-1]:
+        return float(fp[-1] + (fp[-1] - fp[-2]) / (xp[-1] - xp[-2]) * (x - xp[-1]))
+    return float(np.interp(x, xp, fp))
+
+
 def derive_blim_mm(sb_omega, sb_blim_metres, omega):
     """Interpolate the (metre-scale) stability limit at ``omega`` and convert
     to millimetres (``* 1000``) to match the CSV's ``blim`` units.
+
+    The raw H5 boundary columns are not guaranteed monotonic, so they are
+    sorted by omega before interpolating (``np.interp`` needs ascending x), and
+    omega values outside the grid are linearly extrapolated -- the convention
+    the original feature CSVs used (low-speed rows below the grid extrapolate to
+    a negative limit). See ``verify_b_over_blim_provenance.py``.
     """
-    blim_m = float(np.interp(omega, np.asarray(sb_omega, dtype=float),
-                             np.asarray(sb_blim_metres, dtype=float)))
+    o = np.asarray(sb_omega, dtype=float)
+    b = np.asarray(sb_blim_metres, dtype=float)
+    finite = np.isfinite(o) & np.isfinite(b)
+    o, b = o[finite], b[finite]
+    order = np.argsort(o)
+    o, b = o[order], b[order]
+    blim_m = _interp_extrap(float(omega), o, b)
     return blim_m * 1000.0
 
 

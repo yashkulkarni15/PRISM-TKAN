@@ -107,6 +107,14 @@ def _build_train_config(cfg_dict: dict, args: argparse.Namespace) -> TrainConfig
         if args.side_hidden is not None
         else int(cfg_dict.get("side_hidden", 16))
     )
+    severity_mode = (
+        args.severity_mode
+        if args.severity_mode is not None
+        else str(cfg_dict.get("severity_mode", "huber"))
+    )
+    severity_quantiles = tuple(
+        float(q) for q in cfg_dict.get("severity_quantiles", (0.1, 0.5, 0.9))
+    )
 
     return TrainConfig(
         model=model,
@@ -135,6 +143,8 @@ def _build_train_config(cfg_dict: dict, args: argparse.Namespace) -> TrainConfig
         weight_decay=weight_decay,
         side_input=side_input,
         side_hidden=side_hidden,
+        severity_mode=severity_mode,
+        severity_quantiles=severity_quantiles,
     )
 
 
@@ -222,6 +232,14 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="Side-branch MLP width (default: config's `side_hidden`, else 16).",
+    )
+    parser.add_argument(
+        "--severity-mode",
+        default=None,
+        help="Severity head: huber|quantile (tkan/sigkan only). quantile emits "
+        "one column per level in the config's `severity_quantiles` and trains "
+        "the regression term with a pinball loss. Default: config's "
+        "`severity_mode`, else huber.",
     )
     parser.add_argument("--smoke", action="store_true", help="Clamp epochs for a fast CI run.")
     args = parser.parse_args(argv)

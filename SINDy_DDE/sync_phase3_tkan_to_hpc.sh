@@ -37,9 +37,10 @@ rs() { rsync -av --exclude=__pycache__ --exclude='*.pyc' -e "$RSH" "$@"; }
 # Make sure every destination directory exists.
 ssh -o ControlPath="$CTRL" "$REMOTE" "mkdir -p \
   $DEST/src/pri2m/data $DEST/src/pri2m/models $DEST/src/pri2m/training \
-  $DEST/src/pri2m/xai $DEST/src/pri2m/phase3 \
+  $DEST/src/pri2m/xai $DEST/src/pri2m/phase3 $DEST/src/pri2m/analysis \
   $DEST/scripts $DEST/configs $DEST/slurm $DEST/tests $DEST/logs \
-  $DEST/data/metadata $DEST/rapidminer/outputs/phase2"
+  $DEST/data/metadata $DEST/rapidminer/outputs/phase2 \
+  $DEST/results/figures/research_update_assets"
 
 # --- source packages (recursive mirror) ---
 rs src/pri2m/data/      "$REMOTE:$DEST/src/pri2m/data/"
@@ -47,6 +48,7 @@ rs src/pri2m/models/    "$REMOTE:$DEST/src/pri2m/models/"
 rs src/pri2m/training/  "$REMOTE:$DEST/src/pri2m/training/"
 rs src/pri2m/xai/       "$REMOTE:$DEST/src/pri2m/xai/"
 rs src/pri2m/phase3/    "$REMOTE:$DEST/src/pri2m/phase3/"   # splits.assert_no_mirror_leakage dep
+rs src/pri2m/analysis/  "$REMOTE:$DEST/src/pri2m/analysis/" # sindy_dde.py (Update 9 independent delay recovery)
 
 # --- top-level package modules pulled in by Phase 3 imports ---
 rs src/pri2m/__init__.py "$REMOTE:$DEST/src/pri2m/"
@@ -63,12 +65,40 @@ rs scripts/build_features_121_155.py  "$REMOTE:$DEST/scripts/"  # regen physics 
 rs scripts/build_parent_groups.py     "$REMOTE:$DEST/scripts/"  # generates data/metadata/parent_groups.json
 rs scripts/eval_heldout_phase3.py     "$REMOTE:$DEST/scripts/"  # score a checkpoint on held-out datasets (no retrain)
 
+# --- white-box + Update-9 analysis runners (eval-only on the trained checkpoints) ---
+rs scripts/whitebox_phase3.py         "$REMOTE:$DEST/scripts/"  # 7-module white box -> manifest + figures
+rs scripts/render_whitebox_report.py  "$REMOTE:$DEST/scripts/"  # manifest -> whitebox_analysis.md
+rs scripts/plot_whitebox_summary.py   "$REMOTE:$DEST/scripts/"  # per-fold summary figures
+rs scripts/plot_whitebox_replication.py "$REMOTE:$DEST/scripts/" # cross-fold replication figure
+rs scripts/sindy_dde_crosscheck.py    "$REMOTE:$DEST/scripts/"  # independent delay recovery (no net, no pysindy)
+rs scripts/stability_lobe_phase3.py   "$REMOTE:$DEST/scripts/"  # model-implied stability lobe diagram
+rs scripts/counterfactuals_phase3.py  "$REMOTE:$DEST/scripts/"  # physics-constrained counterfactuals
+rs scripts/concept_probes_phase3.py   "$REMOTE:$DEST/scripts/"  # TCAV-style hidden-state concept probes
+rs scripts/conformal_phase3.py        "$REMOTE:$DEST/scripts/"  # split-conformal calibrated uncertainty
+rs scripts/hidden_dynamics_phase3.py  "$REMOTE:$DEST/scripts/"  # recurrent-Jacobian eigenvalue analysis
+rs scripts/fuzz_phase3.py             "$REMOTE:$DEST/scripts/"  # graded input/model degradation suite
+rs scripts/predict_windows_phase3.py  "$REMOTE:$DEST/scripts/"  # per-file network probabilities
+rs scripts/plot_fuzz_replication.py   "$REMOTE:$DEST/scripts/"  # cross-fold fuzz overlay
+
 # --- config + slurm wrapper ---
 rs configs/phase3_tkan.yaml       "$REMOTE:$DEST/configs/"
 rs slurm/phase3_train.sbatch      "$REMOTE:$DEST/slurm/"
 rs slurm/phase3_train_gpu.sbatch  "$REMOTE:$DEST/slurm/"   # GPU + per-fold job array
 rs slurm/phase3_eval_heldout.sbatch "$REMOTE:$DEST/slurm/" # held-out eval sweep (5 folds x eval sets, no retrain)
 rs slurm/phase2_extract_signals.sbatch "$REMOTE:$DEST/slurm/"   # DATA_VERSION-aware H5->NPZ array
+# Update-9 eval-only analysis wrappers (self-contained; default to fold-2 run a654129d):
+rs slurm/phase3_whitebox.sbatch        "$REMOTE:$DEST/slurm/"  # single-fold white box (per-window tau sweep + TSR + symbolic gate)
+rs slurm/run_whitebox_all_folds.sh     "$REMOTE:$DEST/slurm/"  # re-run the white box on all 5 checkpoints
+rs slurm/phase3_sindy_dde.sbatch       "$REMOTE:$DEST/slurm/"
+rs slurm/phase3_stability_lobe.sbatch  "$REMOTE:$DEST/slurm/"
+rs slurm/phase3_counterfactuals.sbatch "$REMOTE:$DEST/slurm/"
+rs slurm/phase3_concept_probes.sbatch  "$REMOTE:$DEST/slurm/"
+rs slurm/phase3_conformal.sbatch       "$REMOTE:$DEST/slurm/"
+rs slurm/phase3_hidden_dynamics.sbatch "$REMOTE:$DEST/slurm/"
+rs slurm/phase3_fuzz.sbatch            "$REMOTE:$DEST/slurm/"
+rs slurm/run_fuzz_all_folds.sh         "$REMOTE:$DEST/slurm/"
+rs slurm/phase3_predict_windows.sbatch "$REMOTE:$DEST/slurm/"
+rs slurm/run_conformal_ensemble.sh     "$REMOTE:$DEST/slurm/"
 
 # --- packaging (adds the [phase3] / [sigkan] extras) ---
 rs pyproject.toml                 "$REMOTE:$DEST/"
@@ -89,7 +119,13 @@ for t in \
   test_kan test_tkan test_tkan_model test_phase3_heads test_phase3_baseline \
   test_phase3_trainer test_xai_kan_native test_xai_attribution \
   test_xai_counterfactuals test_xai_phase3_norm test_phase3_tkan_end_to_end \
-  test_parent_groups test_build_features_121_155 test_eval_heldout ; do
+  test_parent_groups test_build_features_121_155 test_eval_heldout \
+  test_whitebox_phase3 test_render_whitebox_report test_xai_physics \
+  test_xai_symbolic test_sindy_dde test_stability_lobe \
+  test_xai_counterfactuals_physics test_concept_probes test_xai_conformal \
+  test_xai_dynamics test_severity_quantile \
+  test_xai_sampling test_degradation test_spline_atlas test_predict_windows_phase3 \
+  test_concept_probe_circularity test_fuzz_phase3_cli test_plot_fuzz_replication ; do
   rs "tests/$t.py" "$REMOTE:$DEST/tests/"
 done
 

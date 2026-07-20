@@ -47,6 +47,19 @@ weight_decay: 1.0e-4
 # ignored by the MLP baseline (the side-free control).
 side_input: true
 side_hidden: 16
+# Severity-head regression mode. "huber" is the validated point head behind the
+# 0.955 best_auc sweep -- keep it here so nothing in flight changes. "quantile"
+# swaps the single b_over_blim scalar for one column per level below and trains
+# the regression term with a pinball loss instead of weighted MSE, giving
+# prediction INTERVALS for the heavy-tailed severity target (the point estimate
+# stays the median column, so every existing metric still reports). Flip it per
+# run with --severity-mode quantile; tkan/sigkan only (the MLP baseline has a
+# point head and raises). A quantile checkpoint has a wider severity head, so
+# the mode + levels are recorded in preprocessing.json for reload.
+severity_mode: huber
+# Levels emitted in quantile mode (ignored when severity_mode is huber). 0.5 is
+# required in practice: the nearest-to-median column is the point estimate.
+severity_quantiles: [0.1, 0.5, 0.9]
 
 window:
   length: 1024

@@ -98,6 +98,126 @@ def integrated_gradients(
     return attr[0].detach().cpu().numpy()  # [L, C]
 
 
+def temporal_saliency_rescaling(
+    model,
+    window,
+    target: str = "b_over_blim",
+    tau=1,
+    steps: int = 32,
+    extra_scalars: dict[str, float] | None = None,
+    *,
+    alpha: float = 0.5,
+    baseline=None,
+    feature_masking: bool = True,
+) -> dict:
+    """Temporal Saliency Rescaling (Ismail et al., NeurIPS 2020; arXiv:2010.13924).
+
+    Plain Integrated Gradients on a time series *conflates the time and feature
+    domains* and -- for recurrent models -- systematically **under-credits the
+    lagged (early) timesteps** where the regenerative/DDE delay term lives
+    (Input-Cell Attention, arXiv:1910.12370). TSR removes both biases with a
+    two-step, masking-based correction that scores *which lag* separately from
+    *which feature*:
+
+    1. **Time-relevance.** For each timestep ``t`` the window is masked at ``t``
+       (that whole row replaced by ``baseline``) and IG recomputed; the
+       time-relevance ``TR[t] = sum_{i,c} |IG(x) - IG(x masked at t)|`` measures
+       how much *the entire saliency map* moves when ``t`` is removed. A lagged
+       timestep whose removal reshuffles many downstream attributions scores high
+       here even when its own local IG magnitude has vanished.
+    2. **Feature-relevance within salient timesteps.** Timesteps whose ``TR`` is
+       above the ``alpha``-quantile are "salient"; for each the per-feature
+       relevance ``FR[t,c]`` is the same masked-IG delta (``feature_masking=True``,
+       paper-faithful) or simply ``|IG[t,c]|`` (cheaper). Non-salient timesteps
+       get zero.
+
+    The rescaled map is ``TSR[t,c] = TR[t] * FR[t,c]`` -- time importance drives
+    the row, feature importance shapes it, and the two are never conflated.
+
+    Parameters
+    ----------
+    model, window, target, tau, steps, extra_scalars:
+        Exactly as :func:`integrated_gradients` (each masked pass calls it).
+    alpha:
+        Quantile in ``[0, 1)`` of the time-relevance above which a timestep is
+        treated as salient (default ``0.5`` -> the more-relevant half). ``0``
+        keeps every timestep; higher values keep fewer. The single most-relevant
+        timestep is always salient.
+    baseline:
+        Value a masked cell/row is set to (broadcast to the window shape). Default
+        ``None`` -> zeros, matching the IG baseline.
+    feature_masking:
+        ``True`` (default) computes ``FR`` by masking each feature of a salient
+        timestep and re-running IG (paper-faithful, ``O(salient*C)`` extra
+        passes). ``False`` uses ``|IG|`` directly (cheap).
+
+    Returns
+    -------
+    dict
+        ``{"tsr": np[L, C], "ig": np[L, C], "time_relevance": np[L],
+        "salient": np[L] bool, "alpha": float}``. ``tsr`` is exactly zero on
+        non-salient timesteps.
+    """
+    w = np.asarray(window, dtype=float)
+    if w.ndim == 3:
+        if w.shape[0] != 1:
+            raise ValueError(f"window batch must be 1, got shape {tuple(w.shape)}")
+        w = w[0]
+    if w.ndim != 2:
+        raise ValueError(f"window must be [L,C] or [1,L,C], got shape {tuple(w.shape)}")
+    L, C = w.shape
+
+    if baseline is None:
+        base = np.zeros_like(w)
+    else:
+        base = np.broadcast_to(np.asarray(baseline, dtype=float), w.shape).astype(float)
+
+    def _ig(x: np.ndarray) -> np.ndarray:
+        return integrated_gradients(
+            model, x, target=target, tau=tau, steps=steps, extra_scalars=extra_scalars
+        )
+
+    ig0 = _ig(w)  # [L, C]
+
+    # Step 1 -- time relevance: mask each whole timestep, measure the total move.
+    time_rel = np.zeros(L, dtype=float)
+    for t in range(L):
+        xm = w.copy()
+        xm[t, :] = base[t, :]
+        time_rel[t] = float(np.sum(np.abs(ig0 - _ig(xm))))
+
+    # Salient timesteps: time relevance above the alpha-quantile (>= keeps the max).
+    if alpha <= 0.0:
+        thresh = -np.inf
+    else:
+        thresh = float(np.quantile(time_rel, min(max(alpha, 0.0), 1.0)))
+    salient = time_rel >= thresh
+    if not salient.any():  # degenerate: keep at least the most-relevant timestep
+        salient[int(np.argmax(time_rel))] = True
+
+    # Step 2 -- feature relevance within salient timesteps.
+    feat_rel = np.zeros_like(ig0)
+    for t in range(L):
+        if not salient[t]:
+            continue
+        if feature_masking:
+            for c in range(C):
+                xm = w.copy()
+                xm[t, c] = base[t, c]
+                feat_rel[t, c] = float(np.sum(np.abs(ig0 - _ig(xm))))
+        else:
+            feat_rel[t, :] = np.abs(ig0[t, :])
+
+    tsr = feat_rel * time_rel[:, None]  # [L, C]; zero on non-salient rows
+    return {
+        "tsr": tsr,
+        "ig": ig0,
+        "time_relevance": time_rel,
+        "salient": salient,
+        "alpha": float(alpha),
+    }
+
+
 def shap_feature_summary(model_fn, feature_frame):
     """SHAP KernelExplainer over a small per-file tabular feature frame.
 

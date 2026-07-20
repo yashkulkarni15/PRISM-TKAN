@@ -31,6 +31,9 @@ import torch.nn as nn
 from pri2m.models.kan import KANLinear
 
 
+_VALID_SEVERITY_MODES = ("huber", "quantile")
+
+
 class SeverityHead(nn.Module):
     """Map a trunk context ``[B, H]`` to severity outputs.
 
@@ -39,33 +42,83 @@ class SeverityHead(nn.Module):
     hidden_size:
         Width ``H`` of the incoming context vector.
     use_kan:
-        If ``True`` (default), each scalar output is produced by a
-        ``KANLinear(H, 1)`` applied to ``tanh(context)`` (so the B-spline path
-        is active). If ``False``, plain ``nn.Linear(H, 1)`` heads are used.
+        If ``True`` (default), each output is produced by a ``KANLinear``
+        applied to ``tanh(context)`` (so the B-spline path is active). If
+        ``False``, plain ``nn.Linear`` heads are used.
+    severity_mode:
+        ``"huber"`` (default) -- the current point-regression head: a single
+        ``b_over_blim`` scalar per sample. ``"quantile"`` -- emit one column per
+        level in ``quantiles`` (prediction intervals for the heavy-tailed
+        severity target), routed through a pinball loss at train time.
+    quantiles:
+        Quantile levels for ``severity_mode="quantile"`` (each strictly in
+        ``(0, 1)``; ignored in ``"huber"`` mode). The point estimate
+        ``b_over_blim`` is the column nearest the median (0.5).
 
     Returns (from :meth:`forward`)
     ------------------------------
     dict with
-        ``"b_over_blim"`` : Tensor ``[B]`` -- real-valued severity regression.
+        ``"b_over_blim"`` : Tensor ``[B]`` -- point severity (median column in
+        quantile mode).
         ``"chatter_logit"`` : Tensor ``[B]`` -- raw binary-chatter logit.
+        (quantile mode only) ``"b_over_blim_quantiles"`` : Tensor ``[B, Q]`` and
+        ``"quantile_levels"`` : the ``quantiles`` tuple.
     """
 
-    def __init__(self, hidden_size: int, use_kan: bool = True) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        use_kan: bool = True,
+        severity_mode: str = "huber",
+        quantiles=(0.1, 0.5, 0.9),
+    ) -> None:
         super().__init__()
         self.hidden_size = int(hidden_size)
         self.use_kan = bool(use_kan)
+        if severity_mode not in _VALID_SEVERITY_MODES:
+            raise ValueError(
+                f"severity_mode must be one of {_VALID_SEVERITY_MODES}; "
+                f"got {severity_mode!r}"
+            )
+        self.severity_mode = severity_mode
+        if severity_mode == "quantile":
+            q = tuple(float(x) for x in quantiles)
+            if len(q) == 0:
+                raise ValueError("quantile mode requires at least one quantile level")
+            if any(not (0.0 < x < 1.0) for x in q):
+                raise ValueError(
+                    f"quantile levels must lie strictly in (0, 1); got {q}"
+                )
+            self.quantiles = q
+            # Point estimate = the column nearest the median (0.5).
+            self._point_index = min(range(len(q)), key=lambda i: abs(q[i] - 0.5))
+            reg_out = len(q)
+        else:
+            self.quantiles = None
+            self._point_index = 0
+            reg_out = 1
+
         if self.use_kan:
-            self.reg_head = KANLinear(self.hidden_size, 1)
+            self.reg_head = KANLinear(self.hidden_size, reg_out)
             self.cls_head = KANLinear(self.hidden_size, 1)
         else:
-            self.reg_head = nn.Linear(self.hidden_size, 1)
+            self.reg_head = nn.Linear(self.hidden_size, reg_out)
             self.cls_head = nn.Linear(self.hidden_size, 1)
 
     def forward(self, context: torch.Tensor) -> dict:
         # KANLinear's spline path is only active in (-1, 1); squash first.
         x = torch.tanh(context) if self.use_kan else context
-        b_over_blim = self.reg_head(x).squeeze(-1)  # [B, 1] -> [B]
         chatter_logit = self.cls_head(x).squeeze(-1)  # [B, 1] -> [B]
+        reg = self.reg_head(x)  # [B, reg_out]
+        if self.severity_mode == "quantile":
+            point = reg[:, self._point_index]  # [B]
+            return {
+                "b_over_blim": point,
+                "b_over_blim_quantiles": reg,  # [B, Q]
+                "quantile_levels": self.quantiles,
+                "chatter_logit": chatter_logit,
+            }
+        b_over_blim = reg.squeeze(-1)  # [B, 1] -> [B]
         return {"b_over_blim": b_over_blim, "chatter_logit": chatter_logit}
 
 

@@ -207,3 +207,100 @@ def test_load_model_non_side_checkpoint_takes_old_path(tmp_path):
     assert loaded.hidden_size == 8
     assert loaded.input_size == 4
     assert not hasattr(loaded, "side_mean")
+
+
+# --------------------------------------------------------------------------- #
+# _load_model: quantile-severity checkpoints
+#
+# A quantile head is WIDER than the point head (Q columns instead of 1), so a
+# quantile checkpoint cannot be reloaded by the default construction path. The
+# count comes from the state_dict; the LEVELS themselves are unrecoverable from
+# it and must come from preprocessing.json's "severity" block.
+# --------------------------------------------------------------------------- #
+def _save_quantile_checkpoint(tmp_path, *, quantiles=(0.1, 0.5, 0.9)):
+    """Build a small quantile-severity TKANModel and save its state_dict."""
+    torch = pytest.importorskip("torch")
+    from pri2m.models.tkan_model import TKANModel
+
+    torch.manual_seed(0)
+    model = TKANModel(
+        input_size=4, hidden_size=8,
+        severity_mode="quantile", severity_quantiles=quantiles,
+    )
+    ckpt = tmp_path / "best.pt"
+    torch.save(model.state_dict(), ckpt)
+    return model, ckpt
+
+
+def test_load_model_quantile_checkpoint_round_trips_with_severity_block(tmp_path):
+    """A quantile checkpoint + a ``severity`` block reconstructs the exact model."""
+    torch = pytest.importorskip("torch")
+    xai = _load_xai_module()
+
+    model, ckpt = _save_quantile_checkpoint(tmp_path, quantiles=(0.05, 0.5, 0.95))
+    pre = _make_preprocessing([0.0] * 4, [1.0] * 4, ["a", "b", "c", "d"])
+    pre["severity"] = {"mode": "quantile", "quantiles": [0.05, 0.5, 0.95]}
+
+    loaded = xai._load_model(str(ckpt), _model_args(), pre)
+    assert loaded.severity_mode == "quantile"
+    assert loaded.severity.quantiles == (0.05, 0.5, 0.95)
+    assert loaded.hidden_size == 8
+    assert loaded.input_size == 4
+    # Same weights AND the same 3-column severity output as the saved model.
+    batch = {
+        "window": torch.zeros(2, 32, 4),
+        "tau": torch.full((2,), 4, dtype=torch.long),
+    }
+    with torch.no_grad():
+        got, want = loaded(batch), model(batch)
+    assert got["b_over_blim_quantiles"].shape == (2, 3)
+    torch.testing.assert_close(got["b_over_blim_quantiles"], want["b_over_blim_quantiles"])
+
+
+def test_load_model_quantile_checkpoint_rejects_level_count_mismatch(tmp_path):
+    """A severity block whose level count disagrees with the checkpoint fails clearly."""
+    pytest.importorskip("torch")
+    xai = _load_xai_module()
+
+    _, ckpt = _save_quantile_checkpoint(tmp_path)  # 3 columns
+    pre = _make_preprocessing([0.0] * 4, [1.0] * 4, ["a", "b", "c", "d"])
+    pre["severity"] = {"mode": "quantile", "quantiles": [0.5, 0.9]}
+
+    with pytest.raises(ValueError, match="quantile"):
+        xai._load_model(str(ckpt), _model_args(), pre)
+
+
+def test_load_model_quantile_checkpoint_falls_back_to_default_levels(tmp_path, capsys):
+    """No ``severity`` block -> the default levels + a loud warning (cf. side features)."""
+    pytest.importorskip("torch")
+    xai = _load_xai_module()
+
+    _, ckpt = _save_quantile_checkpoint(tmp_path)  # 3 columns == the default
+    pre = _make_preprocessing([0.0] * 4, [1.0] * 4, ["a", "b", "c", "d"])  # no "severity"
+
+    loaded = xai._load_model(str(ckpt), _model_args(), pre)
+    assert loaded.severity_mode == "quantile"
+    assert loaded.severity.quantiles == (0.1, 0.5, 0.9)
+    assert "WARNING" in capsys.readouterr().err
+
+
+def test_load_model_point_checkpoint_keeps_default_severity_mode(tmp_path):
+    """A plain (point) checkpoint still builds the huber head, unchanged."""
+    pytest.importorskip("torch")
+    import torch
+
+    from pri2m.models.tkan_model import TKANModel
+
+    xai = _load_xai_module()
+    torch.manual_seed(0)
+    model = TKANModel(input_size=4, hidden_size=8)
+    ckpt = tmp_path / "best.pt"
+    torch.save(model.state_dict(), ckpt)
+
+    pre = _make_preprocessing([0.0] * 4, [1.0] * 4, ["a", "b", "c", "d"])
+    loaded = xai._load_model(str(ckpt), _model_args(), pre)
+    assert loaded.severity_mode == "huber"
+    assert set(loaded({"window": torch.zeros(2, 32, 4),
+                       "tau": torch.full((2,), 4, dtype=torch.long)})) == {
+        "b_over_blim", "chatter_logit"
+    }

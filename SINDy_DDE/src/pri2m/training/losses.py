@@ -71,6 +71,30 @@ def weighted_bce_with_logits(
     return _weighted_reduce(err, weight)
 
 
+def pinball_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    quantiles,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    """Sample-weighted pinball (quantile) loss, NaN-safe at weight 0.
+
+    ``pred`` is ``[B, Q]`` (one column per quantile level in ``quantiles``),
+    ``target`` is ``[B]``, ``weight`` is ``[B]``. For an error ``e = y - q_pred``
+    the pinball loss at level ``q`` is ``max(q*e, (q-1)*e)`` (under-prediction of
+    a high quantile is penalized more heavily). The per-sample loss is the mean
+    over quantile columns; excluded rows (weight 0) are ignored in both the
+    forward and backward pass even when their target is NaN/inf.
+    """
+    weight = weight.to(pred.dtype)
+    q = torch.as_tensor(tuple(quantiles), dtype=pred.dtype, device=pred.device)
+    safe_target = _mask_target(target, weight > 0)
+    err = safe_target.unsqueeze(-1) - pred  # [B, Q], e = y - q_pred
+    per_quantile = torch.maximum(q * err, (q - 1.0) * err)  # [B, Q]
+    per_sample = per_quantile.mean(dim=-1)  # [B]
+    return _weighted_reduce(per_sample, weight)
+
+
 @dataclass
 class LossWeights:
     """Relative weights for the multi-task severity + trajectory objective."""
@@ -84,17 +108,34 @@ class LossWeights:
 def severity_loss(
     out: dict, batch: dict, lw: LossWeights
 ) -> tuple[torch.Tensor, dict]:
-    """Weighted MSE on ``b_over_blim`` + weighted BCE on the chatter label.
+    """Weighted regression on ``b_over_blim`` + weighted BCE on the chatter label.
 
-    Reads ``out["b_over_blim"]``, ``out["chatter_logit"]`` and
-    ``batch["b_over_blim"]``, ``batch["label"]``, ``batch["sample_weight"]``.
-    Returns ``(lw.w_sev*(lw.w_reg*mse + lw.w_cls*bce), {"sev_mse":..., "sev_bce":...})``.
+    Reads ``out["chatter_logit"]``, ``batch["b_over_blim"]``, ``batch["label"]``,
+    ``batch["sample_weight"]``. The regression term is chosen by the head's mode:
+
+    * default (point) head -- weighted MSE on ``out["b_over_blim"]`` (part
+      ``"sev_mse"``); byte-for-byte the previous behavior.
+    * quantile head (``out`` carries ``"b_over_blim_quantiles"`` +
+      ``"quantile_levels"``) -- weighted pinball loss over the quantile columns
+      (part ``"sev_pinball"``).
+
+    Returns ``(lw.w_sev*(lw.w_reg*reg + lw.w_cls*bce), parts)``.
     """
     weight = batch["sample_weight"]
-    mse = weighted_mse(out["b_over_blim"], batch["b_over_blim"], weight)
     bce = weighted_bce_with_logits(out["chatter_logit"], batch["label"], weight)
-    loss = lw.w_sev * (lw.w_reg * mse + lw.w_cls * bce)
-    parts = {"sev_mse": float(mse.detach()), "sev_bce": float(bce.detach())}
+    if "b_over_blim_quantiles" in out and "quantile_levels" in out:
+        reg = pinball_loss(
+            out["b_over_blim_quantiles"],
+            batch["b_over_blim"],
+            out["quantile_levels"],
+            weight,
+        )
+        reg_key = "sev_pinball"
+    else:
+        reg = weighted_mse(out["b_over_blim"], batch["b_over_blim"], weight)
+        reg_key = "sev_mse"
+    loss = lw.w_sev * (lw.w_reg * reg + lw.w_cls * bce)
+    parts = {reg_key: float(reg.detach()), "sev_bce": float(bce.detach())}
     return loss, parts
 
 

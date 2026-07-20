@@ -187,6 +187,39 @@ class KANLinear(nn.Module):
             "curves": curves.cpu().numpy(),
         }
 
+    @torch.no_grad()
+    def edge_function(self, n: int = 200) -> dict:
+        """Sample each edge's FULL learned activation: base (SiLU) path + spline.
+
+        Unlike :meth:`spline_curves` (which returns only the spline residual),
+        this includes the residual SiLU base path the forward pass actually uses,
+        so each edge ``(o, i)``'s curve is the true learned function
+
+            ``phi_{o,i}(x) = base_weight[o,i] * base_activation(x)
+                              + spline_scale * sum_c basis_c(x) * W[o,i,c]``.
+
+        This is the correct object for white-box reading and symbolic fitting:
+        for an ``in_features == out_features == 1`` layer it equals ``forward``.
+
+        Returns
+        -------
+        dict with
+            ``"x"``      : ``np.ndarray[n]`` sweep points over ``grid_range``.
+            ``"curves"`` : ``np.ndarray[out_features, in_features, n]`` -- the
+                           full edge activation ``phi_{o,i}(x)`` at each ``x``.
+        """
+        sampled = self.spline_curves(n)
+        xs = torch.linspace(
+            self.grid_range[0], self.grid_range[1], n,
+            device=self.grid.device, dtype=self.grid.dtype,
+        )
+        base_x = self.base_activation(xs)  # [n], e.g. SiLU(x)
+        # base contribution of edge (o, i) as a function of its own input:
+        # base_weight[o, i] * base_activation(x). [out, in, n]
+        base = self.base_weight.unsqueeze(-1) * base_x.view(1, 1, -1)
+        curves = torch.as_tensor(sampled["curves"], device=self.grid.device) + base
+        return {"x": sampled["x"], "curves": curves.cpu().numpy()}
+
     # ------------------------------------------------------------------ #
     # Regularization (efficient-kan style)
     # ------------------------------------------------------------------ #

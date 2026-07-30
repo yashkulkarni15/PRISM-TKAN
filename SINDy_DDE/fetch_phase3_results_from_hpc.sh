@@ -61,7 +61,7 @@ fi
 #    carries Monte Carlo survival and, when run with DICE=1, the DiCE arm).
 # --------------------------------------------------------------------------- #
 echo; echo ">>> [4/4] U13 results (regenerative + counterfactuals)"
-for sub in regenerative counterfactuals; do
+for sub in regenerative counterfactuals activation_modes; do
   if ssh -o ControlPath="$CTRL" "$REMOTE" "test -d '$DEST/results/phase3/xai/$sub'"; then
     rs "$REMOTE:$DEST/results/phase3/xai/$sub/" "results/phase3/xai/$sub/"
   else
@@ -91,6 +91,24 @@ for p in sorted(glob.glob("results/phase3/xai/regenerative/*/regenerative.json")
     s = d.get("summary", d)
     print(f"  regenerative {p.split('/')[-2]:12s} "
           f"{time.strftime('%m-%d %H:%M', time.localtime(os.path.getmtime(p)))}")
+print("\nU14-B activation modes:")
+for p in sorted(glob.glob("results/phase3/xai/activation_modes/*/activation_modes_manifest.json")):
+    d = json.load(open(p))
+    prov, by_k = d.get("provenance", {}), d.get("by_k", {})
+    done = prov.get("complete")
+    print(f"  {p.split('/')[-2]:10s} complete={done}  k={sorted(by_k, key=int)}"
+          f"  seeds={prov.get('n_untrained_seeds')}")
+    if not done:
+        print("    *** PARTIAL SWEEP -- a manifest is written after every k, so"
+              " presence alone proves nothing ***")
+    for k in sorted(by_k, key=int):
+        v = (by_k[k].get("verdict") or {})
+        art = v.get("artifact_suspected")
+        state = ("UNDECIDED (NOT a pass)" if art is None
+                 else "ARTIFACT SUSPECTED" if art else "MODES SURVIVE")
+        print(f"    k={k}: {state}  trained={v.get('trained_score')}"
+              f"  untrained_p95={v.get('untrained_reference')}")
+
 for p in sorted(glob.glob("results/phase3/xai/counterfactuals/*manifest.json")):
     pooled = json.load(open(p)).get("pooled", {})
     surv, dice = pooled.get("survival"), pooled.get("dice")

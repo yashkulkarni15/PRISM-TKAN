@@ -79,6 +79,8 @@ rs scripts/plot_whitebox_summary.py   "$REMOTE:$DEST/scripts/"  # per-fold summa
 rs scripts/plot_whitebox_replication.py "$REMOTE:$DEST/scripts/" # cross-fold replication figure
 rs scripts/sindy_dde_crosscheck.py    "$REMOTE:$DEST/scripts/"  # independent delay recovery (no net, no pysindy)
 rs scripts/regenerative_phase3.py     "$REMOTE:$DEST/scripts/"  # U13-C: is x(t)-x(t-tau) in the learned splines?
+rs scripts/activation_modes_phase3.py  "$REMOTE:$DEST/scripts/"  # U14-B: do folds share learned activation shapes?
+rs scripts/repeatability_audit.py     "$REMOTE:$DEST/scripts/"  # run-to-run floor, reads summary.json only
 rs scripts/stability_lobe_phase3.py   "$REMOTE:$DEST/scripts/"  # model-implied stability lobe diagram
 rs scripts/counterfactuals_phase3.py  "$REMOTE:$DEST/scripts/"  # physics-constrained counterfactuals
 rs scripts/concept_probes_phase3.py   "$REMOTE:$DEST/scripts/"  # TCAV-style hidden-state concept probes
@@ -113,6 +115,7 @@ rs slurm/phase3_predict_windows.sbatch "$REMOTE:$DEST/slurm/"
 rs slurm/run_conformal_ensemble.sh     "$REMOTE:$DEST/slurm/"
 rs slurm/phase3_regenerative.sbatch    "$REMOTE:$DEST/slurm/"  # U13-C: regenerative spline test (single fold)
 rs slurm/run_regenerative_all_folds.sh "$REMOTE:$DEST/slurm/"  # U13-C across all 5 checkpoints
+rs slurm/phase3_activation_modes.sbatch "$REMOTE:$DEST/slurm/"  # U14-B: CPU-only, 5 folds, k-sweep + untrained null
 
 # --- packaging (adds the [phase3] / [sigkan] extras) ---
 rs pyproject.toml                 "$REMOTE:$DEST/"
@@ -141,7 +144,8 @@ for t in \
   test_xai_sampling test_degradation test_spline_atlas test_predict_windows_phase3 \
   test_concept_probe_circularity test_fuzz_phase3_cli test_plot_fuzz_replication \
   test_xai_spectral test_whitebox_tsr_delay_lock test_tsr_control \
-  test_cf_monte_carlo test_xai_regenerative test_counterfactuals_phase3_cli ; do
+  test_cf_monte_carlo test_xai_regenerative test_counterfactuals_phase3_cli \
+  test_activation_modes ; do
   rs "tests/$t.py" "$REMOTE:$DEST/tests/"
 done
 

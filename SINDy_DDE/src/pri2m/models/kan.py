@@ -187,13 +187,17 @@ class KANLinear(nn.Module):
             "curves": curves.cpu().numpy(),
         }
 
+    #: Valid ``component=`` selectors for :meth:`edge_function`.
+    EDGE_COMPONENTS: tuple[str, ...] = ("full", "spline", "base")
+
     @torch.no_grad()
-    def edge_function(self, n: int = 200) -> dict:
-        """Sample each edge's FULL learned activation: base (SiLU) path + spline.
+    def edge_function(self, n: int = 200, component: str = "full") -> dict:
+        """Sample each edge's learned activation: base (SiLU) path + spline.
 
         Unlike :meth:`spline_curves` (which returns only the spline residual),
-        this includes the residual SiLU base path the forward pass actually uses,
-        so each edge ``(o, i)``'s curve is the true learned function
+        the default includes the residual SiLU base path the forward pass
+        actually uses, so each edge ``(o, i)``'s curve is the true learned
+        function
 
             ``phi_{o,i}(x) = base_weight[o,i] * base_activation(x)
                               + spline_scale * sum_c basis_c(x) * W[o,i,c]``.
@@ -201,14 +205,48 @@ class KANLinear(nn.Module):
         This is the correct object for white-box reading and symbolic fitting:
         for an ``in_features == out_features == 1`` layer it equals ``forward``.
 
+        Parameters
+        ----------
+        n:
+            Number of sweep points over ``grid_range``.
+        component:
+            Which part of ``phi`` to return.
+
+            ``"full"`` (default)
+                base + spline -- the function the forward pass computes. The
+                arithmetic is unchanged from before this selector existed, so
+                every already-validated curve, symbolic fit and figure is
+                bit-for-bit unaffected.
+            ``"spline"``
+                the spline residual only, identical to :meth:`spline_curves`.
+                This is the component to *cluster* on: the base path is exactly
+                ``base_weight[o,i] * base_activation(x)``, a one-parameter
+                family with no shape information, so shape-normalised base
+                curves are all the same unit vector up to sign and would
+                collapse into a single meaningless cluster.
+            ``"base"``
+                the base path only, so a caller can report what fraction of an
+                edge each component carries. Any claim about what the network
+                *computes* must still be made about ``"full"``.
+
         Returns
         -------
         dict with
             ``"x"``      : ``np.ndarray[n]`` sweep points over ``grid_range``.
             ``"curves"`` : ``np.ndarray[out_features, in_features, n]`` -- the
-                           full edge activation ``phi_{o,i}(x)`` at each ``x``.
+                           selected component of ``phi_{o,i}(x)`` at each ``x``.
         """
+        if component not in self.EDGE_COMPONENTS:
+            raise ValueError(
+                f"unknown component {component!r}; expected one of "
+                f"{self.EDGE_COMPONENTS}"
+            )
         sampled = self.spline_curves(n)
+        if component == "spline":
+            # spline_curves already allocates fresh arrays, so this is a plain
+            # re-export -- no base term is constructed at all.
+            return {"x": sampled["x"], "curves": sampled["curves"]}
+
         xs = torch.linspace(
             self.grid_range[0], self.grid_range[1], n,
             device=self.grid.device, dtype=self.grid.dtype,
@@ -217,6 +255,8 @@ class KANLinear(nn.Module):
         # base contribution of edge (o, i) as a function of its own input:
         # base_weight[o, i] * base_activation(x). [out, in, n]
         base = self.base_weight.unsqueeze(-1) * base_x.view(1, 1, -1)
+        if component == "base":
+            return {"x": sampled["x"], "curves": base.cpu().numpy()}
         curves = torch.as_tensor(sampled["curves"], device=self.grid.device) + base
         return {"x": sampled["x"], "curves": curves.cpu().numpy()}
 

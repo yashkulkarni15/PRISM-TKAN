@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?><process version="12.1.001">
+  <context>
+    <input/>
+    <output/>
+    <macros/>
+  </context>
+  <operator activated="true" class="process" compatibility="12.1.001" expanded="true" name="Process">
+    <parameter key="logverbosity" value="init"/>
+    <parameter key="random_seed" value="2001"/>
+    <parameter key="send_mail" value="never"/>
+    <parameter key="notification_email" value=""/>
+    <parameter key="process_duration_for_mail" value="30"/>
+    <parameter key="encoding" value="SYSTEM"/>
+    <process expanded="true">
+      <operator activated="true" class="open_file" compatibility="12.1.001" expanded="true" height="68" name="Open File" width="90" x="112" y="187">
+        <parameter key="resource_type" value="file"/>
+        <parameter key="filename" value="/Users/yash/Downloads/PRI2M/SINDy_DDE/rapidminer/outputs/xgboost_v3_smoke/dummy.txt"/>
+      </operator>
+      <operator activated="true" class="productivity:execute_program" compatibility="12.1.001" expanded="true" height="103" name="Execute Program" width="90" x="313" y="289">
+        <parameter key="command" value="/Users/yash/Downloads/PRI2M/SINDy_DDE/rapidminer/wrappers/run_xgboost_v3_smoke.sh"/>
+        <parameter key="log_stdout" value="true"/>
+        <parameter key="log_stderr" value="true"/>
+        <parameter key="working_directory" value="/Users/yash/Downloads/PRI2M/SINDy_DDE"/>
+        <list key="env_variables"/>
+      </operator>
+      <operator activated="true" class="retrieve" compatibility="12.1.001" expanded="true" height="68" name="Retrieve pri2m_xgb_v3_summary" width="90" x="514" y="391">
+        <parameter key="repository_entry" value="//Local Repository/pri2m_xgb_v3_summary"/>
+      </operator>
+      <connect from_op="Open File" from_port="file" to_op="Execute Program" to_port="in"/>
+      <connect from_op="Execute Program" from_port="out" to_port="result 1"/>
+      <connect from_op="Retrieve pri2m_xgb_v3_summary" from_port="output" to_port="result 2"/>
+      <portSpacing port="source_input 1" spacing="0"/>
+      <portSpacing port="sink_result 1" spacing="0"/>
+      <portSpacing port="sink_result 2" spacing="0"/>
+      <portSpacing port="sink_result 3" spacing="0"/>
+    </process>
+  </operator>
+</process>

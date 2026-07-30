@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=00:30:00
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/phase3_counterfactuals_%j.log
 #SBATCH --error=logs/phase3_counterfactuals_%j.err
 #SBATCH --mail-user=yashkulk@umich.edu
@@ -52,6 +52,15 @@ FIG_DIR="${FIG_DIR:-$PROJECT_ROOT/results/figures/research_update_assets}"
 CHECKPOINT="${CHECKPOINT:-}"     # optional provenance
 PREDICTIONS="${PREDICTIONS:-}"   # optional model per-window probs (file,prob/severity)
 
+# U13-A: Monte Carlo survival (ON by default -- it is the missing half of plan
+# criterion 7). U13-B: the real DiCE arm (OFF by default; needs PREDICTIONS,
+# because DiCE is wired as a regressor and the label surrogate is a classifier).
+MC_DRAWS="${MC_DRAWS:-512}"
+MC_SEED="${MC_SEED:-0}"
+MC_MARGIN="${MC_MARGIN:-0.0}"
+DICE="${DICE:-0}"
+DICE_TOTAL_CFS="${DICE_TOTAL_CFS:-2}"
+
 cd "$PROJECT_ROOT"
 
 module load python3.11-anaconda
@@ -73,9 +82,25 @@ echo "Predictions: ${PREDICTIONS:-<none, using table labels>}"
 echo "Output:      $OUTPUT_DIR"
 echo "Started:     $(date)"
 
+echo "MC draws:    $MC_DRAWS (seed $MC_SEED, margin $MC_MARGIN)"
+echo "DiCE:        $DICE"
+
 EXTRA=()
 if [[ -n "$CHECKPOINT" ]]; then EXTRA+=(--checkpoint "$CHECKPOINT"); fi
 if [[ -n "$PREDICTIONS" ]]; then EXTRA+=(--predictions "$PREDICTIONS"); fi
+EXTRA+=(--mc-draws "$MC_DRAWS" --mc-seed "$MC_SEED" --mc-margin "$MC_MARGIN")
+
+if [[ "$DICE" == "1" ]]; then
+  # Preflight, not a crash: the runner already degrades to an error field if
+  # dice_ml is absent, but saying so up front beats reading it out of JSON.
+  if python -c "import dice_ml" 2>/dev/null; then
+    echo "dice_ml:     present"
+  else
+    echo "dice_ml:     MISSING -- the DiCE arm will report an error field;" >&2
+    echo "             survival + agreement results are unaffected." >&2
+  fi
+  EXTRA+=(--dice --dice-total-cfs "$DICE_TOTAL_CFS")
+fi
 
 python scripts/counterfactuals_phase3.py \
   --table "$TABLE" \

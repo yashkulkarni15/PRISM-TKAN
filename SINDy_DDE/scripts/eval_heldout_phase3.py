@@ -49,6 +49,7 @@ from pri2m.data.phase3_sequence import (  # noqa: E402
     WindowConfig,
     collate_windows,
 )
+from pri2m.phase3.predict import window_config_from_preprocessing  # noqa: E402
 from pri2m.phase3.splits import add_parent_group  # noqa: E402
 from pri2m.training.phase3_trainer import (  # noqa: E402
     Phase3Trainer,
@@ -64,24 +65,10 @@ from scripts.xai_phase3 import _find_preprocessing, _load_model  # noqa: E402
 __all__ = ["build_eval_table", "run", "main"]
 
 
-def _window_config_from_preprocessing(preprocessing: dict) -> WindowConfig:
-    """Rebuild the training :class:`WindowConfig` from a ``preprocessing.json``.
-
-    ``channels`` is the saved channel order (defaults to the WindowConfig default
-    so an older manifest without the key still works); ``length`` / ``stride``
-    come from the ``window`` block. Matching the training geometry is required so
-    the held-out windows are sliced the same way the model was trained on.
-    """
-    window = preprocessing.get("window", {}) or {}
-    channels = preprocessing.get("channels")
-    kwargs: dict = {}
-    if "length" in window:
-        kwargs["length"] = int(window["length"])
-    if "stride" in window:
-        kwargs["stride"] = int(window["stride"])
-    if channels:
-        kwargs["channels"] = tuple(str(c) for c in channels)
-    return WindowConfig(**kwargs)
+# Moved to pri2m.phase3.predict so the team-facing scripts/predict_phase3.py can
+# reuse it without importing this script. Kept under the old private name: this
+# module's callers (and tests) import it from here.
+_window_config_from_preprocessing = window_config_from_preprocessing
 
 
 def build_eval_table(

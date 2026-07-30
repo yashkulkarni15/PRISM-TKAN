@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=24:00:00
+#SBATCH --time=72:00:00
 #SBATCH --output=logs/phase3_whitebox_%j.log
 #SBATCH --error=logs/phase3_whitebox_%j.err
 #SBATCH --mail-user=yashkulk@umich.edu
@@ -52,6 +52,8 @@ TABLE="${TABLE:-$PROJECT_ROOT/results/phase3/phase3_dataset.csv}"
 PREPROCESSING="${PREPROCESSING:-}"   # blank -> runner auto-discovers
 OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/results/phase3/xai/$TAG}"
 N_WINDOWS="${N_WINDOWS:-256}"        # sample of windows for dataset-level analyses
+SAMPLE_SEED="${SAMPLE_SEED:-0}"      # seeded window draw (default 0 = prior runs);
+                                     # the sharded TSR array must use the SAME seed.
 TOP_K="${TOP_K:-25}"                 # edges to symbolify
 # Temporal-saliency-rescaling sample size. Defaults match the runner's own
 # defaults, so leaving these unset reproduces previous runs exactly. TSR cost is
@@ -101,18 +103,31 @@ if [[ -n "$VAL_AUC" ]]; then
   VAL_FLAG=(--val-auc "$VAL_AUC")
 fi
 
+# SKIP_TSR=1 runs every analysis EXCEPT the (dominant-cost) TSR stage -- the
+# "fixed stage" half of the sharded workflow (slurm/run_whitebox_sharded.sh).
+# TSR is then computed by the array (phase3_whitebox_tsr_array.sbatch) and folded
+# back in by scripts/merge_tsr_shards.py. Default (unset) runs TSR inline as before.
+SKIP_TSR="${SKIP_TSR:-}"
+SKIP_FLAG=()
+if [[ -n "$SKIP_TSR" && "$SKIP_TSR" != "0" ]]; then
+  SKIP_FLAG=(--skip-tsr)
+  echo "Mode:       --skip-tsr (fixed stages only; TSR sharded separately)"
+fi
+
 python scripts/whitebox_phase3.py \
   --checkpoint "$CHECKPOINT" \
   --npz-root "$NPZ_ROOT" \
   --table "$TABLE" \
   --output-dir "$OUTPUT_DIR" \
   --n-windows "$N_WINDOWS" \
+  --sample-seed "$SAMPLE_SEED" \
   --top-k "$TOP_K" \
   --tsr-windows "$TSR_WINDOWS" \
   --tsr-steps "$TSR_STEPS" \
   --run-id "$RUN_ID" \
   --tag "$TAG" \
   "${VAL_FLAG[@]}" \
+  "${SKIP_FLAG[@]}" \
   "${PRE_FLAG[@]}"
 
 echo "Finished: $(date)"

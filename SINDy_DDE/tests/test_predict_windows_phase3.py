@@ -70,7 +70,9 @@ def test_predictions_merge_into_counterfactual_surrogate(tmp_path):
     out = tmp_path / "preds.csv"
     P.main(["--checkpoint", str(_checkpoint(tmp_path)), "--table", str(csv),
             "--npz-root", str(npz_root), "--out", str(out)])
-    predict, info = CF.build_surrogate(table, predictions=str(out), seed=0)
+    # 3-tuple since U13-B: DiCE needs the fitted estimator, not just the closure.
+    predict, info, est = CF.build_surrogate(table, predictions=str(out), seed=0)
     assert info["source"] == "model_predictions" and info["target_col"] == "prob"
+    assert hasattr(est, "predict")
     p = predict(np.array([[float(table["omega"].iloc[0]), float(table["b_mm"].iloc[0])]]))
     assert 0.0 <= float(p[0]) <= 1.0

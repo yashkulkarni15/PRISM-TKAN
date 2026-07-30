@@ -41,20 +41,9 @@ for _p in (str(_SRC), str(_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import pandas as pd  # noqa: E402  (after sys.path setup)
-import torch  # noqa: E402
-from torch.utils.data import DataLoader  # noqa: E402
-
-from pri2m.data.phase3_sequence import (  # noqa: E402
-    NormStats,
-    Phase3SequenceDataset,
-    collate_windows,
-)
+from pri2m.phase3.predict import predict_files  # noqa: E402  (after sys.path setup)
 from pri2m.training.phase3_trainer import resolve_device  # noqa: E402
-from scripts.eval_heldout_phase3 import (  # noqa: E402
-    _window_config_from_preprocessing,
-    build_eval_table,
-)
+from scripts.eval_heldout_phase3 import build_eval_table  # noqa: E402
 from scripts.xai_phase3 import _find_preprocessing, _load_model  # noqa: E402
 
 __all__ = ["main"]
@@ -96,9 +85,6 @@ def main(argv: list[str] | None = None) -> int:
 
     dev = resolve_device(args.device)
     model = _load_model(args.checkpoint, args, pre)
-    model.pool = int(pre.get("pool", 1))
-    model.to(dev)
-    model.eval()
 
     eval_table, _ = build_eval_table(args.table, args.npz_root)
     wanted = _parse_dataset_filter(args.dataset)
@@ -107,43 +93,20 @@ def main(argv: list[str] | None = None) -> int:
     if eval_table.empty:
         raise SystemExit(f"no rows left to score after --dataset={args.dataset!r} filter")
 
-    # The z-score MUST come from the checkpoint's own preprocessing.json, never
-    # refit here (same discipline as eval_heldout_phase3.run).
-    norm = NormStats.from_dict(pre["norm"])
-    cfg = _window_config_from_preprocessing(pre)
-    dataset = Phase3SequenceDataset(eval_table, args.npz_root, cfg=cfg, norm=norm)
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_windows)
+    # The scoring loop (and the z-score discipline: norm/window/pool come from the
+    # checkpoint's own preprocessing.json, never refit here) lives in
+    # pri2m.phase3.predict, shared with the team-facing scripts/predict_phase3.py
+    # so the two entry points cannot drift apart.
+    predictions = predict_files(
+        model, eval_table, args.npz_root, pre,
+        batch_size=args.batch_size, device=dev,
+    )
 
-    sums: dict[str, float] = {}
-    counts: dict[str, int] = {}
-    meta: dict[str, tuple[int, int]] = {}
-    with torch.no_grad():
-        for batch in loader:
-            batch = {k: (v.to(dev) if torch.is_tensor(v) else v) for k, v in batch.items()}
-            probs = torch.sigmoid(model(batch)["chatter_logit"]).detach().cpu().numpy()
-            labels = batch["label"].detach().cpu().numpy()
-            # batch["dataset"] entries are already python ints (Phase3SequenceDataset
-            # casts via int(meta["dataset"])); int() below is a cheap normalization
-            # in case a future loader change makes them strings.
-            for f, d, lab, p in zip(batch["file"], batch["dataset"], labels, probs):
-                sums[f] = sums.get(f, 0.0) + float(p)
-                counts[f] = counts.get(f, 0) + 1
-                meta[f] = (int(d), int(lab))
-
-    rows = [
-        {
-            "file": f,
-            "prob": sums[f] / counts[f],
-            "n_windows": counts[f],
-            "dataset": meta[f][0],
-            "label": meta[f][1],
-        }
-        for f in sums
-    ]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows, columns=["file", "prob", "n_windows", "dataset", "label"]).to_csv(out, index=False)
-    print(f"[predict_windows] scored {len(rows)} files ({len(dataset)} windows) -> {out}")
+    predictions.to_csv(out, index=False)
+    n_windows = int(predictions["n_windows"].sum())
+    print(f"[predict_windows] scored {len(predictions)} files ({n_windows} windows) -> {out}")
     return 0
 
 

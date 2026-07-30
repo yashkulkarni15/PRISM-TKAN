@@ -39,6 +39,7 @@ ssh -o ControlPath="$CTRL" "$REMOTE" "mkdir -p \
   $DEST/src/pri2m/data $DEST/src/pri2m/models $DEST/src/pri2m/training \
   $DEST/src/pri2m/xai $DEST/src/pri2m/phase3 $DEST/src/pri2m/analysis \
   $DEST/scripts $DEST/configs $DEST/slurm $DEST/tests $DEST/logs \
+  $DEST/docs/phase3_tkan \
   $DEST/data/metadata $DEST/rapidminer/outputs/phase2 \
   $DEST/results/figures/research_update_assets"
 
@@ -67,10 +68,17 @@ rs scripts/eval_heldout_phase3.py     "$REMOTE:$DEST/scripts/"  # score a checkp
 
 # --- white-box + Update-9 analysis runners (eval-only on the trained checkpoints) ---
 rs scripts/whitebox_phase3.py         "$REMOTE:$DEST/scripts/"  # 7-module white box -> manifest + figures
+rs scripts/merge_tsr_shards.py        "$REMOTE:$DEST/scripts/"  # reassemble sharded TSR -> results["tsr"]
+rs scripts/tsr_control_phase3.py      "$REMOTE:$DEST/scripts/"  # U12-B: is the delay-lock learned or constructed?
 rs scripts/render_whitebox_report.py  "$REMOTE:$DEST/scripts/"  # manifest -> whitebox_analysis.md
+# ...and its TEMPLATE, which render_whitebox_report.py reads from docs/ by default.
+# The documented flow renders locally after rsync-back, but shipping the renderer
+# without its template leaves a copy on GL that cannot run.
+rs docs/phase3_tkan/whitebox_analysis.md "$REMOTE:$DEST/docs/phase3_tkan/"
 rs scripts/plot_whitebox_summary.py   "$REMOTE:$DEST/scripts/"  # per-fold summary figures
 rs scripts/plot_whitebox_replication.py "$REMOTE:$DEST/scripts/" # cross-fold replication figure
 rs scripts/sindy_dde_crosscheck.py    "$REMOTE:$DEST/scripts/"  # independent delay recovery (no net, no pysindy)
+rs scripts/regenerative_phase3.py     "$REMOTE:$DEST/scripts/"  # U13-C: is x(t)-x(t-tau) in the learned splines?
 rs scripts/stability_lobe_phase3.py   "$REMOTE:$DEST/scripts/"  # model-implied stability lobe diagram
 rs scripts/counterfactuals_phase3.py  "$REMOTE:$DEST/scripts/"  # physics-constrained counterfactuals
 rs scripts/concept_probes_phase3.py   "$REMOTE:$DEST/scripts/"  # TCAV-style hidden-state concept probes
@@ -88,7 +96,11 @@ rs slurm/phase3_eval_heldout.sbatch "$REMOTE:$DEST/slurm/" # held-out eval sweep
 rs slurm/phase2_extract_signals.sbatch "$REMOTE:$DEST/slurm/"   # DATA_VERSION-aware H5->NPZ array
 # Update-9 eval-only analysis wrappers (self-contained; default to fold-2 run a654129d):
 rs slurm/phase3_whitebox.sbatch        "$REMOTE:$DEST/slurm/"  # single-fold white box (per-window tau sweep + TSR + symbolic gate)
-rs slurm/run_whitebox_all_folds.sh     "$REMOTE:$DEST/slurm/"  # re-run the white box on all 5 checkpoints
+rs slurm/run_whitebox_all_folds.sh     "$REMOTE:$DEST/slurm/"  # re-run the white box on all 5 checkpoints (inline TSR)
+rs slurm/phase3_whitebox_tsr_array.sbatch "$REMOTE:$DEST/slurm/"  # sharded TSR array worker (--tsr-only)
+rs slurm/phase3_whitebox_merge.sbatch  "$REMOTE:$DEST/slurm/"  # fold TSR shards back into the manifest
+rs slurm/phase3_tsr_control.sbatch     "$REMOTE:$DEST/slurm/"  # U12-B control (cheap: 1 fold, ~24 windows)
+rs slurm/run_whitebox_sharded.sh       "$REMOTE:$DEST/slurm/"  # sharded workflow DAG: fixed run + TSR array + merge, all 5 folds
 rs slurm/phase3_sindy_dde.sbatch       "$REMOTE:$DEST/slurm/"
 rs slurm/phase3_stability_lobe.sbatch  "$REMOTE:$DEST/slurm/"
 rs slurm/phase3_counterfactuals.sbatch "$REMOTE:$DEST/slurm/"
@@ -99,6 +111,8 @@ rs slurm/phase3_fuzz.sbatch            "$REMOTE:$DEST/slurm/"
 rs slurm/run_fuzz_all_folds.sh         "$REMOTE:$DEST/slurm/"
 rs slurm/phase3_predict_windows.sbatch "$REMOTE:$DEST/slurm/"
 rs slurm/run_conformal_ensemble.sh     "$REMOTE:$DEST/slurm/"
+rs slurm/phase3_regenerative.sbatch    "$REMOTE:$DEST/slurm/"  # U13-C: regenerative spline test (single fold)
+rs slurm/run_regenerative_all_folds.sh "$REMOTE:$DEST/slurm/"  # U13-C across all 5 checkpoints
 
 # --- packaging (adds the [phase3] / [sigkan] extras) ---
 rs pyproject.toml                 "$REMOTE:$DEST/"
@@ -120,12 +134,14 @@ for t in \
   test_phase3_trainer test_xai_kan_native test_xai_attribution \
   test_xai_counterfactuals test_xai_phase3_norm test_phase3_tkan_end_to_end \
   test_parent_groups test_build_features_121_155 test_eval_heldout \
-  test_whitebox_phase3 test_render_whitebox_report test_xai_physics \
+  test_whitebox_phase3 test_whitebox_tsr_shard test_render_whitebox_report test_xai_physics \
   test_xai_symbolic test_sindy_dde test_stability_lobe \
   test_xai_counterfactuals_physics test_concept_probes test_xai_conformal \
   test_xai_dynamics test_severity_quantile \
   test_xai_sampling test_degradation test_spline_atlas test_predict_windows_phase3 \
-  test_concept_probe_circularity test_fuzz_phase3_cli test_plot_fuzz_replication ; do
+  test_concept_probe_circularity test_fuzz_phase3_cli test_plot_fuzz_replication \
+  test_xai_spectral test_whitebox_tsr_delay_lock test_tsr_control \
+  test_cf_monte_carlo test_xai_regenerative test_counterfactuals_phase3_cli ; do
   rs "tests/$t.py" "$REMOTE:$DEST/tests/"
 done
 

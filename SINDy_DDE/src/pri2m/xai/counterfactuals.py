@@ -363,6 +363,255 @@ def validate_against_blim(cf_results, blim_fn, *, margin: float = 0.0) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Monte Carlo survival under machining uncertainty (Task U13-A)
+# --------------------------------------------------------------------------- #
+# :func:`validate_against_blim` scores a counterfactual at its NOMINAL point.
+# A machinist cannot use a recommendation that only holds there: spindles jitter,
+# depth of cut carries a tolerance, and the cutting coefficients that set the
+# analytic limit are themselves uncertain. :func:`monte_carlo_survival` re-asks
+# the same physics question under those tolerances and returns, per case, the
+# fraction of sampled operating points that still sit in the stable region.
+
+#: Default machining tolerances used when ``uncertainty`` is not supplied.
+#: ``*_rel`` entries are relative (fraction of the nominal value), ``*_abs``
+#: entries are absolute (rpm for ``omega``, mm for ``b``). Under the default
+#: ``dist="normal"`` each value is a standard deviation; under ``"uniform"`` it
+#: is a half-width.
+DEFAULT_CF_UNCERTAINTY: dict = {
+    "omega_rel": 0.02,   # 2% spindle-speed jitter
+    "b_abs": 0.05,       # 0.05 mm depth-of-cut tolerance
+    "blim_rel": 0.10,    # 10% uncertainty on blim (b_lim ~ 1/Ktc, fn, ...)
+    "dist": "normal",
+}
+
+_UNCERTAINTY_KEYS: tuple[str, ...] = (
+    "omega_rel",
+    "omega_abs",
+    "b_rel",
+    "b_abs",
+    "blim_rel",
+    "blim_abs",
+)
+_DISTS: tuple[str, ...] = ("normal", "uniform")
+
+#: Survival threshold behind the project's "survival rate above 0.85" criterion.
+SURVIVAL_THRESHOLD: float = 0.85
+
+
+def _resolve_uncertainty(uncertainty) -> dict:
+    """Validate + fill an uncertainty spec (fails loudly on typos)."""
+    spec = dict(DEFAULT_CF_UNCERTAINTY if uncertainty is None else uncertainty)
+
+    unknown = set(spec) - set(_UNCERTAINTY_KEYS) - {"dist"}
+    if unknown:
+        raise ValueError(
+            f"unknown uncertainty key(s) {sorted(unknown)}; expected any of "
+            f"{list(_UNCERTAINTY_KEYS)} plus 'dist'"
+        )
+
+    dist = str(spec.get("dist", "normal"))
+    if dist not in _DISTS:
+        raise ValueError(f"uncertainty['dist'] must be one of {list(_DISTS)}, got {dist!r}")
+
+    out: dict = {"dist": dist}
+    for key in _UNCERTAINTY_KEYS:
+        val = float(spec.get(key, 0.0))
+        if not np.isfinite(val) or val < 0.0:
+            raise ValueError(f"uncertainty[{key!r}] must be a finite, non-negative width, got {val}")
+        out[key] = val
+    return out
+
+
+def _draw_noise(rng, dist: str, width: float, n: int) -> np.ndarray:
+    """``n`` zero-centred perturbations of the given width (0 => exactly zero)."""
+    if width == 0.0 or n == 0:
+        return np.zeros(n)
+    if dist == "uniform":
+        return rng.uniform(-width, width, size=n)
+    return rng.normal(0.0, width, size=n)
+
+
+def _blim_at(blim_fn, omegas: np.ndarray) -> np.ndarray:
+    """Evaluate ``blim_fn`` over an array, tolerating scalar-only callables."""
+    omegas = np.asarray(omegas, dtype=float).reshape(-1)
+    try:
+        vals = np.asarray(blim_fn(omegas), dtype=float).reshape(-1)
+        if vals.size == omegas.size:
+            return vals
+        if vals.size == 1:  # a constant-boundary callable
+            return np.full(omegas.size, float(vals[0]))
+    except Exception:
+        pass
+    return np.array(
+        [float(np.asarray(blim_fn(float(o))).reshape(-1)[0]) for o in omegas], dtype=float
+    )
+
+
+def _survival_one(cf_result: dict, blim_fn, unc: dict, n_draws: int, margin: float, rng) -> dict:
+    """Survival record for one counterfactual (see :func:`monte_carlo_survival`)."""
+    pc: dict = {
+        "omega_base": float(cf_result["omega_base"]),
+        "b_base": float(cf_result["b_base"]),
+        "flips": bool(cf_result.get("flips", False)),
+        "omega_cf": cf_result.get("omega_cf"),
+        "b_cf": cf_result.get("b_cf"),
+        "blim_at_cf": None,
+        "distance_to_boundary_cf": None,
+        "physics_stable_cf": False,
+        "survival": None,
+        "survival_above_0_85": False,
+        "n_draws": int(n_draws),
+    }
+
+    if cf_result.get("omega_cf") is None:
+        # Nothing was recommended, so there is nothing to stress-test. Left
+        # unscored (``None``) rather than 0.0 -- a missing recommendation is not
+        # a recommendation that fails.
+        return pc
+
+    o_cf = float(cf_result["omega_cf"])
+    b_cf = float(cf_result["b_cf"])
+
+    # Nominal verdict, on exactly the terms validate_against_blim uses.
+    blim_nom = float(_blim_at(blim_fn, np.array([o_cf]))[0])
+    dist_nom = blim_nom - b_cf
+    pc.update(
+        omega_cf=o_cf,
+        b_cf=b_cf,
+        blim_at_cf=blim_nom,
+        distance_to_boundary_cf=dist_nom,
+        physics_stable_cf=bool(dist_nom > margin),
+    )
+
+    if n_draws <= 0:
+        # Deterministic special case: the survival rate collapses onto the
+        # nominal indicator, i.e. validate_against_blim's ``physics_stable_cf``.
+        survival = float(pc["physics_stable_cf"])
+    else:
+        d = unc["dist"]
+        omega_draw = (
+            o_cf
+            + o_cf * _draw_noise(rng, d, unc["omega_rel"], n_draws)
+            + _draw_noise(rng, d, unc["omega_abs"], n_draws)
+        )
+        b_draw = (
+            b_cf
+            + b_cf * _draw_noise(rng, d, unc["b_rel"], n_draws)
+            + _draw_noise(rng, d, unc["b_abs"], n_draws)
+        )
+        b_draw = np.maximum(b_draw, 0.0)  # a negative depth of cut is not a thing
+
+        blim_draw = _blim_at(blim_fn, omega_draw)
+        # b_lim ~ 1/Ktc (Altintas-Budak), so coefficient/modal uncertainty enters
+        # as a multiplicative (plus optional additive) perturbation of the limit.
+        blim_draw = blim_draw * (1.0 + _draw_noise(rng, d, unc["blim_rel"], n_draws))
+        blim_draw = blim_draw + _draw_noise(rng, d, unc["blim_abs"], n_draws)
+
+        survival = float(np.mean((blim_draw - b_draw) > margin))
+
+    pc.update(
+        survival=survival,
+        survival_above_0_85=bool(survival > SURVIVAL_THRESHOLD),
+    )
+    return pc
+
+
+def monte_carlo_survival(
+    cf_results,
+    blim_fn,
+    *,
+    uncertainty=None,
+    n_draws: int = 512,
+    seed: int = 0,
+    margin: float = 0.0,
+) -> dict:
+    """Risk-rate physics-constrained CFs by Monte Carlo over machining tolerances.
+
+    Sibling of :func:`validate_against_blim`: same inputs, same per-case +
+    aggregate shape, but instead of one nominal verdict each counterfactual gets
+    a *survival rate* -- the fraction of perturbed operating points that are
+    still physically stable::
+
+        survival = mean over draws of [ b_draw < blim(omega_draw) - margin ]
+
+    where ``omega_draw`` / ``b_draw`` perturb ``(omega_cf, b_cf)`` by the
+    machining tolerances in ``uncertainty`` and the boundary itself may be
+    perturbed via ``blim_rel`` (``b_lim ~ 1/Ktc``, so coefficient and modal
+    uncertainty scale the limit).
+
+    Parameters
+    ----------
+    cf_results:
+        A single :func:`physics_constrained_counterfactual` result dict, or a
+        list of them (same as :func:`validate_against_blim`).
+    blim_fn:
+        Callable ``omega -> blim`` (mm). Called with an array when it accepts
+        one; scalar-only callables are supported via a per-draw fallback.
+    uncertainty:
+        Tolerance widths -- any of ``omega_rel, omega_abs, b_rel, b_abs,
+        blim_rel, blim_abs`` plus ``dist`` (``"normal"``, the default, treats
+        widths as standard deviations; ``"uniform"`` treats them as half-widths).
+        Defaults to :data:`DEFAULT_CF_UNCERTAINTY`. Unknown keys and negative
+        widths raise :class:`ValueError`.
+    n_draws:
+        Monte Carlo draws per case. ``0`` is the deterministic special case and
+        reproduces ``validate_against_blim(..., margin=margin)`` exactly
+        (survival is then the 0/1 nominal indicator).
+    seed:
+        Seeds a local :class:`numpy.random.Generator`; the global ``np.random``
+        state is never touched or consulted, so results depend only on
+        ``(cf_results, uncertainty, n_draws, seed, margin)``.
+    margin:
+        A draw counts as stable only when ``blim - b > margin`` (mm), matching
+        :func:`validate_against_blim`'s margin semantics.
+
+    Returns
+    -------
+    dict
+        ``per_case`` (per-CF records: ``omega_base, b_base, flips, omega_cf,
+        b_cf, blim_at_cf, distance_to_boundary_cf, physics_stable_cf, survival,
+        survival_above_0_85, n_draws``), plus aggregates ``n_cases, n_flips,
+        n_scored, n_above_0_85, frac_above_0_85, mean_survival, median_survival,
+        min_survival, n_draws, seed, uncertainty``.
+
+        ``n_above_0_85`` is the headline count -- cases whose survival exceeds
+        :data:`SURVIVAL_THRESHOLD`. Cases where the search found no
+        counterfactual are *unscored*: ``survival`` is ``None``, they are
+        excluded from ``n_scored`` and every rate, and they never count toward
+        ``n_above_0_85``.
+    """
+    if isinstance(cf_results, dict):
+        cf_results = [cf_results]
+
+    unc = _resolve_uncertainty(uncertainty)
+    n_draws = int(n_draws)
+    if n_draws < 0:
+        raise ValueError(f"n_draws must be >= 0, got {n_draws}")
+
+    rng = np.random.default_rng(seed)
+    per_case = [_survival_one(r, blim_fn, unc, n_draws, float(margin), rng) for r in cf_results]
+
+    survivals = [pc["survival"] for pc in per_case if pc["survival"] is not None]
+    n_scored = len(survivals)
+    n_above = sum(1 for pc in per_case if pc["survival_above_0_85"])
+
+    return {
+        "per_case": per_case,
+        "n_cases": len(per_case),
+        "n_flips": sum(1 for pc in per_case if pc["flips"]),
+        "n_scored": n_scored,
+        "n_above_0_85": n_above,
+        "frac_above_0_85": (n_above / n_scored) if n_scored else None,
+        "mean_survival": (float(np.mean(survivals)) if survivals else None),
+        "median_survival": (float(np.median(survivals)) if survivals else None),
+        "min_survival": (float(np.min(survivals)) if survivals else None),
+        "n_draws": n_draws,
+        "seed": seed,
+        "uncertainty": unc,
+    }
+
+
 def mode_conditioned_explanation(row: dict) -> dict:
     """Route a per-file explanation by its signal mode.
 

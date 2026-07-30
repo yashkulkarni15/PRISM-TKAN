@@ -170,6 +170,329 @@ def _now_date() -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Temporal Saliency Rescaling -- factored out of main() so the (by far most
+# expensive) TSR stage can run either inline or sharded across a SLURM array.
+# scripts/merge_tsr_shards.py reassembles per-window entries via tsr_aggregate()
+# into the identical results["tsr"] block a single un-sharded run would write.
+# Every function below depends only on its explicit args (no closure over main's
+# locals) so a shard worker and the full runner compute bit-identical entries.
+# --------------------------------------------------------------------------- #
+def tsr_select_indices(labels, tsr_windows: int) -> list[int]:
+    """Deterministic, class-balanced TSR window indices (interleave chatter/stable).
+
+    Depends only on ``labels`` -- itself seeded via ``build_labeled_batch`` -- so
+    every shard task and the merge step agree on the identical global ordering.
+    """
+    labels = np.asarray(labels)
+    chatter = np.flatnonzero(labels == 1).tolist()
+    stable = np.flatnonzero(labels == 0).tolist()
+    chosen: list[int] = []
+    cap = max(0, int(tsr_windows))
+    for pos in range(max(len(chatter), len(stable))):
+        for group in (chatter, stable):
+            if pos < len(group) and len(chosen) < cap:
+                chosen.append(int(group[pos]))
+    return chosen
+
+
+def _tsr_channel_shares(values) -> dict:
+    totals = np.abs(np.asarray(values, dtype=float)).sum(axis=0)
+    denom = float(totals.sum())
+    if denom <= np.finfo(float).eps:
+        totals = np.ones(len(CHANNELS), dtype=float)
+        denom = float(totals.sum())
+    return {ch: float(totals[c] / denom) for c, ch in enumerate(CHANNELS)}
+
+
+def tr_delay_statistics(time_relevance, tau: int) -> dict:
+    """Peak-lag and delay-lock statistics for one window's time-relevance curve.
+
+    ``tr_peak_lag`` is retained verbatim for back-compat, but it is a *global
+    argmax of the relevance autocorrelation over lags* ``[2, N/2]``. When that
+    autocorrelation decays monotonically -- no periodicity resolved at all --
+    ``argmax`` returns index 0 and this emits **2**, the search floor. That reads
+    like a measured lag and is not one: on the 2026-07-23/24 five-fold run, 550
+    of 640 windows (85.9%) came back as exactly 2. ``tr_peak_at_floor`` states
+    which happened, so the sentinel can never be averaged into a mean again.
+
+    ``tr_lock_z`` is the argmax-free replacement, and the statistic the peak lag
+    was only ever a proxy for: how far the autocorrelation **at lag tau** sits
+    above the spread of autocorrelations at every other searched lag. It has no
+    boundary to be pinned against, it tests the physical delay directly instead
+    of asking where the maximum happens to fall, and it is ``None`` -- never a
+    guess -- whenever tau is untestable (outside the searched range, or a
+    degenerate/constant relevance curve). The nulls include the short lags, so a
+    genuine lag-tau bump must out-rank the near-lag correlation of a smooth
+    curve to register. ``z > 2`` is the decision rule for "locked".
+    """
+    tr = np.asarray(time_relevance, dtype=float).ravel()
+    centered = tr - tr.mean()
+    corr = np.correlate(centered, centered, mode="full")[len(centered) - 1 :]
+    upper = min(len(centered) // 2, len(corr) - 1)
+
+    if upper >= 2:
+        searched = corr[2 : upper + 1]
+        peak_lag = int(np.argmax(searched) + 2)
+        at_floor = peak_lag == 2
+    else:
+        searched = np.empty(0, dtype=float)
+        peak_lag = int(max(1, upper))
+        at_floor = False
+
+    lock_z = None
+    tau_lag = int(tau)
+    if searched.size >= 2 and 2 <= tau_lag <= upper:
+        spread = float(searched.std())
+        if spread > np.finfo(float).eps:
+            lock_z = float((corr[tau_lag] - float(searched.mean())) / spread)
+
+    return {
+        "tr_peak_lag": peak_lag,
+        "tr_peak_at_floor": bool(at_floor),
+        "tr_lock_z": lock_z,
+        "tr_n_lags": int(searched.size),
+    }
+
+
+def tsr_one_window(model, batch, esl, labels, i: int, steps: int,
+                   tau_override: int | None = None,
+                   feature_masking: bool = True) -> dict:
+    """TSR for a single window index -> one ``per_window`` entry (order-free).
+
+    ``tau_override`` substitutes a different delay for this window without
+    touching the batch. It exists for the U12-B control (:func:`run_tsr_control`),
+    which needs to ask whether the delay-lock follows whatever tau is injected --
+    the signature of a construction artifact -- or only the true one.
+
+    ``feature_masking=False`` is ~3x cheaper and leaves ``tr_lock_z`` /
+    ``tr_peak_lag`` **bit-identical**: the flag only selects how step 2 scores the
+    *feature* dimension, while both statistics are derived from step 1's
+    ``time_relevance``, which is computed the same either way. It does change the
+    ``channel_share_tsr`` values, so it is a real trade for the sweep and a free
+    speedup for any lag-only question.
+    """
+    tau_raw = int(batch["tau"][i]) if tau_override is None else int(tau_override)
+    res = attribution.temporal_saliency_rescaling(
+        model,
+        batch["window"][i],
+        target="chatter_logit",
+        tau=tau_raw,
+        steps=int(steps),
+        extra_scalars=(esl[i] if esl else None),
+        feature_masking=bool(feature_masking),
+    )
+    return {
+        "index": int(i),
+        "label": int(labels[i]),
+        "channel_share_tsr": _tsr_channel_shares(res["tsr"]),
+        "channel_share_ig": _tsr_channel_shares(res["ig"]),
+        **tr_delay_statistics(res["time_relevance"], tau_raw),
+        "tau_raw": tau_raw,
+    }
+
+
+def tsr_aggregate(per_window: list[dict], steps: int) -> dict:
+    """Reduce ``per_window`` entries into the ``results['tsr']`` block.
+
+    Every reduction is order-invariant, so a sharded run whose windows are
+    reassembled in canonical order yields the same block as an inline run.
+    """
+    def _mean_share(key):
+        return {
+            ch: float(np.mean([row[key][ch] for row in per_window]))
+            for ch in CHANNELS
+        }
+
+    # A window "resolved" iff its peak was not pinned to the search floor. Rows
+    # written before 2026-07-25 carry no such key; treat them as unresolved only
+    # when they sit at the floor, so old manifests reduce sensibly rather than
+    # silently claiming every window resolved.
+    def _at_floor(row):
+        if "tr_peak_at_floor" in row:
+            return bool(row["tr_peak_at_floor"])
+        return int(row.get("tr_peak_lag", 2)) == 2
+
+    resolved = [r for r in per_window if not _at_floor(r)]
+    locks = [r["tr_lock_z"] for r in per_window if r.get("tr_lock_z") is not None]
+
+    return {
+        "per_window": per_window,
+        "n_windows": len(per_window),
+        "steps": int(steps),
+        "mean_channel_share_tsr": _mean_share("channel_share_tsr"),
+        "mean_channel_share_ig": _mean_share("channel_share_ig"),
+        # Back-compat: the mean that pools the floor sentinel with real peaks.
+        # Kept so returned manifests stay readable -- NEVER quote it alone.
+        "tr_peak_lag_mean": float(np.mean([r["tr_peak_lag"] for r in per_window])),
+        "tau_raw_mean": float(np.mean([r["tau_raw"] for r in per_window])),
+        # What the above must always be read beside.
+        "n_resolved": len(resolved),
+        "resolved_fraction": (
+            float(len(resolved) / len(per_window)) if per_window else 0.0
+        ),
+        "tr_peak_lag_mean_resolved": (
+            float(np.mean([r["tr_peak_lag"] for r in resolved])) if resolved else None
+        ),
+        # The argmax-free delay test.
+        "n_lock_tested": len(locks),
+        "lock_z_mean": float(np.mean(locks)) if locks else None,
+        "lock_z_frac_above_2": (
+            float(sum(1 for z in locks if z > 2.0) / len(locks)) if locks else None
+        ),
+    }
+
+
+def tsr_control_verdict(trained_lock, untrained_lock, threshold: float = 0.8) -> dict:
+    """Did training produce the delay-lock, or did the input construction?
+
+    The delayed channel is the signal shifted by tau, so a lag-tau bump in the
+    relevance autocorrelation can arise with no learning at all. The test is an
+    untrained network on the same construction: if random weights lock to tau
+    nearly as hard as the trained ones, the lock is not evidence about the model.
+
+    ``artifact_suspected`` is ``True`` when the untrained lock reaches
+    ``threshold`` of the trained lock (default 80%), and **None when either side
+    is unmeasurable** -- a missing measurement must never read as "cleared".
+    """
+    if trained_lock is None or untrained_lock is None:
+        return {
+            "trained_lock": trained_lock,
+            "untrained_lock": untrained_lock,
+            "lock_gain_over_untrained": None,
+            "threshold": float(threshold),
+            "artifact_suspected": None,
+        }
+    trained_lock, untrained_lock = float(trained_lock), float(untrained_lock)
+    # Compare against |trained|: a trained lock at or below zero carries no
+    # signal to attribute, so any untrained lock at all is disqualifying.
+    ref = abs(trained_lock)
+    suspected = untrained_lock >= float(threshold) * ref if ref > 0 else True
+    return {
+        "trained_lock": trained_lock,
+        "untrained_lock": untrained_lock,
+        "lock_gain_over_untrained": trained_lock - untrained_lock,
+        "threshold": float(threshold),
+        "artifact_suspected": bool(suspected),
+    }
+
+
+def run_tsr_control(trained_model, untrained_model, batch, esl, labels,
+                    indices, steps: int, seed: int = 0,
+                    threshold: float = 0.8,
+                    feature_masking: bool = True,
+                    progress=None, on_condition=None) -> dict:
+    """U12-B: the construction-artifact control for the TSR delay-lock.
+
+    Three conditions on the same windows and the same input construction:
+
+    ``trained_true_tau``
+        the real checkpoint at each window's own tau -- the measurement.
+    ``untrained_true_tau``
+        a randomly-initialised net of the same architecture. **This is the
+        decisive one.** If it locks too, the lock is a property of how the
+        delayed channel is built, not of anything learned.
+    ``trained_shuffled_tau``
+        the real checkpoint with taus permuted across windows, which asks
+        whether the lock simply follows whichever delay is injected.
+
+    Deliberately cheap: pass a short ``indices`` list. Settling this needs a few
+    dozen windows on one fold, not the 128-window five-fold sweep -- the sweep
+    measured the effect, this only has to attribute it.
+
+    ``progress(condition, done, total)`` fires after every scored window and
+    ``on_condition(name, result_so_far)`` after every finished condition, so a
+    caller can log and checkpoint. Both default to None (silent, unchanged).
+    The decisive pair is scored FIRST, so a run killed inside the third
+    condition still hands back a decidable verdict -- job 55098053 lost twelve
+    hours to a wall with nothing written, and that must not repeat.
+    """
+    idx = [int(i) for i in indices]
+    rng = np.random.default_rng(int(seed))
+    true_taus = [int(batch["tau"][i]) for i in idx]
+
+    # Permute taus across windows. A shuffle that returns the identity would
+    # make the condition vacuous, so keep drawing (bounded) until it moves.
+    shuffled = list(true_taus)
+    if len(set(true_taus)) > 1:
+        for _ in range(64):
+            shuffled = list(rng.permutation(true_taus))
+            if shuffled != true_taus:
+                break
+
+    # ORDER IS LOAD-BEARING: the decisive pair first, the supporting condition
+    # last, so a wall-clock kill in the third still leaves a verdict on disk.
+    conditions = {
+        "trained_true_tau": (trained_model, [None] * len(idx)),
+        "untrained_true_tau": (untrained_model, [None] * len(idx)),
+        "trained_shuffled_tau": (trained_model, shuffled),
+    }
+
+    def _assemble(done: dict) -> dict:
+        """Snapshot of the result as it stands. Verdict only once both sides in."""
+        pair = ("trained_true_tau", "untrained_true_tau")
+        verdict = None
+        if all(k in done for k in pair):
+            verdict = tsr_control_verdict(
+                done["trained_true_tau"]["lock_z_mean"],
+                done["untrained_true_tau"]["lock_z_mean"],
+                threshold=threshold,
+            )
+        return {"conditions": dict(done), "verdict": verdict}
+
+    out = {}
+    for name, (model, overrides) in conditions.items():
+        per_window = []
+        for done, (i, ov) in enumerate(zip(idx, overrides), start=1):
+            per_window.append(
+                tsr_one_window(model, batch, esl, labels, i, steps, tau_override=ov,
+                               feature_masking=feature_masking)
+            )
+            if progress is not None:
+                progress(name, done, len(idx))
+        out[name] = tsr_aggregate(per_window, steps)
+        if on_condition is not None:
+            on_condition(name, _assemble(out))
+
+    return _assemble(out)
+
+
+def _run_tsr_shard(args, model, batch, esl, labels, out_dir: Path) -> int:
+    """SLURM-array worker: compute TSR for this shard's slice of the global window
+    set and write a shard file for scripts/merge_tsr_shards.py. No other analysis
+    runs and no manifest is written -- the fixed stages come from a separate
+    ``--skip-tsr`` run over the same seeded batch.
+    """
+    nshards = max(1, int(args.tsr_nshards))
+    shard = int(args.tsr_shard)
+    if not 0 <= shard < nshards:
+        raise ValueError(f"--tsr-shard {shard} out of range for --tsr-nshards {nshards}")
+    chosen = tsr_select_indices(labels, args.tsr_windows)
+    if not chosen:
+        raise ValueError("TSR requires at least one sampled window")
+    # Strided assignment: shard k owns global positions p with p % nshards == k.
+    # Each entry carries its global position p so the merge restores exact order.
+    mine = [(pos, i) for pos, i in enumerate(chosen) if pos % nshards == shard]
+    per_window_indexed = [
+        [pos, tsr_one_window(model, batch, esl, labels, i, args.tsr_steps)]
+        for pos, i in mine
+    ]
+    shard_dir = out_dir / "tsr_shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    shard_path = shard_dir / f"shard_{shard:04d}_of_{nshards:04d}.json"
+    payload = {
+        "shard": shard,
+        "nshards": nshards,
+        "tsr_windows": int(args.tsr_windows),
+        "n_selected": len(chosen),
+        "steps": int(args.tsr_steps),
+        "per_window_indexed": per_window_indexed,
+    }
+    shard_path.write_text(json.dumps(payload, indent=2, default=float), encoding="utf-8")
+    print(f"TSR shard {shard}/{nshards}: {len(per_window_indexed)} window(s) -> {shard_path}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
@@ -188,6 +511,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ig-steps", type=int, default=24)
     parser.add_argument("--tsr-windows", type=int, default=4)
     parser.add_argument("--tsr-steps", type=int, default=8)
+    # Sharded-TSR workflow (the TSR stage dominates wall time at high --tsr-windows;
+    # split it across a SLURM array and merge with scripts/merge_tsr_shards.py).
+    parser.add_argument("--skip-tsr", action="store_true",
+                        help="Run every analysis EXCEPT TSR (results['tsr']=None). "
+                             "The fixed-stage run of the sharded workflow.")
+    parser.add_argument("--tsr-only", action="store_true",
+                        help="Compute ONLY this shard of TSR windows and write a shard "
+                             "file (no other analysis, no manifest).")
+    parser.add_argument("--tsr-shard", type=int, default=0, help="This shard's 0-based index.")
+    parser.add_argument("--tsr-nshards", type=int, default=1, help="Total number of TSR shards.")
     parser.add_argument("--prune-threshold", type=float, default=0.01)
     # xai_phase3._load_model reads these names off the args namespace.
     parser.add_argument("--input-size", type=int, default=None)
@@ -221,6 +554,10 @@ def main(argv: list[str] | None = None) -> int:
     tau0 = int(np.median(np.asarray(taus)))
     fs0 = float(batch["fs"][0]) if "fs" in batch else 10_000.0
     tpf0 = float(batch["tpf"][0]) if "tpf" in batch else fs0 / max(1, tau0)
+
+    # SLURM-array worker: compute one TSR shard and exit before any other stage.
+    if args.tsr_only:
+        return _run_tsr_shard(args, model, batch, esl, labels, out_dir)
 
     results: dict = {}
     artifacts: dict = {}
@@ -293,69 +630,18 @@ def main(argv: list[str] | None = None) -> int:
     results["attribution_spectrum"] = _safe("attribution_spectrum", _spectrum)
 
     # ---- Temporal Saliency Rescaling --------------------------------------- #
+    # The single most expensive stage; --skip-tsr runs the fixed-stage half of the
+    # sharded workflow, with TSR reassembled later by scripts/merge_tsr_shards.py.
     def _tsr():
-        chatter = np.flatnonzero(np.asarray(labels) == 1).tolist()
-        stable = np.flatnonzero(np.asarray(labels) == 0).tolist()
-        chosen: list[int] = []
-        for pos in range(max(len(chatter), len(stable))):
-            for group in (chatter, stable):
-                if pos < len(group) and len(chosen) < max(0, int(args.tsr_windows)):
-                    chosen.append(int(group[pos]))
+        chosen = tsr_select_indices(labels, args.tsr_windows)
         if not chosen:
             raise ValueError("TSR requires at least one sampled window")
+        per_window = [
+            tsr_one_window(model, batch, esl, labels, i, args.tsr_steps) for i in chosen
+        ]
+        return tsr_aggregate(per_window, args.tsr_steps)
 
-        def _channel_shares(values):
-            totals = np.abs(np.asarray(values, dtype=float)).sum(axis=0)
-            denom = float(totals.sum())
-            if denom <= np.finfo(float).eps:
-                totals = np.ones(len(CHANNELS), dtype=float)
-                denom = float(totals.sum())
-            return {ch: float(totals[c] / denom) for c, ch in enumerate(CHANNELS)}
-
-        per_window = []
-        for i in chosen:
-            res = attribution.temporal_saliency_rescaling(
-                model,
-                batch["window"][i],
-                target="chatter_logit",
-                tau=int(batch["tau"][i]),
-                steps=int(args.tsr_steps),
-                extra_scalars=(esl[i] if esl else None),
-            )
-            tr = np.asarray(res["time_relevance"], dtype=float)
-            centered = tr - tr.mean()
-            corr = np.correlate(centered, centered, mode="full")[len(centered) - 1 :]
-            upper = min(len(centered) // 2, len(corr) - 1)
-            if upper >= 2:
-                peak_lag = int(np.argmax(corr[2 : upper + 1]) + 2)
-            else:
-                peak_lag = int(max(1, upper))
-            per_window.append({
-                "index": int(i),
-                "label": int(labels[i]),
-                "channel_share_tsr": _channel_shares(res["tsr"]),
-                "channel_share_ig": _channel_shares(res["ig"]),
-                "tr_peak_lag": peak_lag,
-                "tau_raw": int(batch["tau"][i]),
-            })
-
-        def _mean_share(key):
-            return {
-                ch: float(np.mean([row[key][ch] for row in per_window]))
-                for ch in CHANNELS
-            }
-
-        return {
-            "per_window": per_window,
-            "n_windows": len(per_window),
-            "steps": int(args.tsr_steps),
-            "mean_channel_share_tsr": _mean_share("channel_share_tsr"),
-            "mean_channel_share_ig": _mean_share("channel_share_ig"),
-            "tr_peak_lag_mean": float(np.mean([r["tr_peak_lag"] for r in per_window])),
-            "tau_raw_mean": float(np.mean([r["tau_raw"] for r in per_window])),
-        }
-
-    results["tsr"] = _safe("tsr", _tsr)
+    results["tsr"] = None if args.skip_tsr else _safe("tsr", _tsr)
 
     # ---- Faithfulness ------------------------------------------------------- #
     def _faith():
@@ -574,19 +860,46 @@ def _build_report(provenance: dict, results: dict, artifacts: dict) -> dict:
     tsr = results.get("tsr")
     if tsr:
         rep["tsr_table"] = _md_table(
-            ["window", "label", "top TSR channel", "top IG channel", "TR peak lag", "tau"],
+            ["window", "label", "top TSR channel", "top IG channel",
+             "TR peak lag", "resolved", "tau"],
             [[r.get("index", i), r["label"],
               max(r["channel_share_tsr"], key=r["channel_share_tsr"].get),
               max(r["channel_share_ig"], key=r["channel_share_ig"].get),
-              r["tr_peak_lag"], r["tau_raw"]]
+              r["tr_peak_lag"],
+              "no" if r.get("tr_peak_at_floor", r["tr_peak_lag"] == 2) else "yes",
+              r["tau_raw"]]
              for i, r in enumerate(tsr["per_window"])],
         )
+        # The mean SIGNED change is identically zero and always was: both share
+        # vectors sum to 1, so the per-channel deltas cancel by construction.
+        # Report the mean ABSOLUTE shift, which is what "how far did the
+        # rescaling move the attribution" actually asks.
         rep["tsr_delay_share_gain"] = _fmt(np.mean([
-            tsr["mean_channel_share_tsr"][ch] - tsr["mean_channel_share_ig"][ch]
+            abs(tsr["mean_channel_share_tsr"][ch] - tsr["mean_channel_share_ig"][ch])
             for ch in CHANNELS
         ]))
         rep["tsr_windows"] = int(tsr["n_windows"])
         rep["tsr_steps"] = int(tsr["steps"])
+
+        # A peak-lag number must never appear without the resolved fraction
+        # beside it -- the argmax returns its search floor when no peak exists.
+        n_res = tsr.get("n_resolved")
+        rep["tsr_resolved"] = (
+            f"{n_res} of {tsr['n_windows']}" if n_res is not None else "not recorded"
+        )
+        rep["tsr_resolved_pct"] = (
+            _fmt(100.0 * tsr["resolved_fraction"])
+            if tsr.get("resolved_fraction") is not None else "n/a"
+        )
+        mean_res = tsr.get("tr_peak_lag_mean_resolved")
+        rep["tsr_peak_lag_resolved"] = (
+            _fmt(mean_res) if mean_res is not None else "no window resolved a peak"
+        )
+        lock_mean = tsr.get("lock_z_mean")
+        rep["tsr_lock_z_mean"] = _fmt(lock_mean) if lock_mean is not None else "n/a"
+        rep["tsr_lock_tested"] = int(tsr.get("n_lock_tested") or 0)
+        lock_frac = tsr.get("lock_z_frac_above_2")
+        rep["tsr_lock_pct"] = _fmt(100.0 * lock_frac) if lock_frac is not None else "n/a"
 
     fa = results.get("faithfulness")
     if fa:

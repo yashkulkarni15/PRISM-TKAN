@@ -69,3 +69,6 @@ Dataset\ 2/
 !src/.gitkeep
 !results/.gitkeep
 !docs/.gitkeep
+
+# Word lock/temp files
+~$*

@@ -37,8 +37,9 @@ submit fold3      3a40b71514cd41b98916330c000d700a 0.9605
 submit fold4      0937883918354ed899a61afb90aac14f 0.9695
 
 echo ""
-echo "Submitted 5 white-box jobs (CPU, standard partition, up to 24h wall; the"
-echo "512-window run overran the old 4h limit, so the sbatch now requests 24h)."
+echo "Submitted 5 white-box jobs (CPU, standard partition, up to 72h wall; the"
+echo "512-window + raised-TSR run overran the old 24h limit, so the sbatch now"
+echo "requests 72h -- standard partition MaxTime is 14 days, so this is fine)."
 echo "Watch:  squeue -u \$USER"
 echo "Then pull artifacts to the Mac (one rsync, run LOCALLY):"
 echo "  rsync -av yashkulk@greatlakes.arc-ts.umich.edu:/nfs/turbo/coe-jaabell/PRI2M/results/phase3/xai/ \\"

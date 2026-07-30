@@ -1,0 +1,7 @@
+/home/yashkulk/envs/prism/lib/python3.11/site-packages/torch/_inductor/compile_fx.py:320: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+  warnings.warn(
+[phase3_trainer] WARNING: epoch 7: skipped 15/3334 batches with non-finite loss or grad norm (weights kept finite; cf. GL job 51641089)
+[phase3_trainer] WARNING: epoch 8: skipped 10/3334 batches with non-finite loss or grad norm (weights kept finite; cf. GL job 51641089)
+[phase3_trainer] WARNING: epoch 9: skipped 1661/3334 batches with non-finite loss or grad norm (weights kept finite; cf. GL job 51641089)
+[phase3_trainer] WARNING: epoch 10: skipped 19/3334 batches with non-finite loss or grad norm (weights kept finite; cf. GL job 51641089)
+[phase3_trainer] WARNING: epoch 11: skipped 9/3334 batches with non-finite loss or grad norm (weights kept finite; cf. GL job 51641089)

@@ -15,6 +15,9 @@ import traceback
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
+import torch
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 for path in (REPO_ROOT, REPO_ROOT / "src", REPO_ROOT / "scripts"):
     if str(path) not in sys.path:
@@ -63,6 +66,68 @@ def _self_check(fuzzers: dict, baseline: dict) -> dict:
             "abs_dev": deviations,
         }
     return {"passed": bool(passed), "max_abs_dev": float(max_abs_dev), "per_fuzzer": per_fuzzer}
+
+
+def _subset_batch(batch: dict, keep) -> dict:
+    """Copy ``batch`` keeping only the windows flagged in ``keep`` (bool array).
+
+    Every per-window entry has to be subset together -- tensors and the plain
+    python lists (``file``, ``parent_group``, ...) that ``collate_windows``
+    emits alongside them -- or the surviving windows get someone else's
+    metadata attached.
+    """
+    keep = np.asarray(keep, dtype=bool)
+    n_b, idx = int(keep.size), np.flatnonzero(keep)
+    tidx = torch.as_tensor(idx, dtype=torch.long)
+    out = {}
+    for key, value in batch.items():
+        if torch.is_tensor(value) and value.dim() >= 1 and value.shape[0] == n_b:
+            out[key] = value[tidx]
+        elif isinstance(value, list) and len(value) == n_b:
+            out[key] = [value[int(i)] for i in idx]
+        else:
+            out[key] = value
+    return out
+
+
+def _band_notch_contrast(model, batch, labels) -> dict:
+    """Matched-energy chatter-band vs tooth-pass contrast on the sampled batch.
+
+    fs/fn/tpf are read off the batch PER WINDOW and handed over whole.
+    ``collate_windows`` emits all three alongside the signal, so this costs
+    nothing extra -- but collapsing them to batch means (as this runner did
+    until 2026-07-30) aims every window's notch at a frequency where that window
+    has no chatter energy, and the experiment deletes empty spectrum.
+
+    A window whose fn/fs/tpf is non-finite is DROPPED, not tolerated: the mean
+    of a batch containing one NaN is NaN, so the old guard threw away all 512
+    windows whenever a single row lacked a modal frequency. Only when nothing
+    usable is left does the contrast report ``{"error": "fn unavailable"}``.
+    """
+    fn_t = batch.get("fn")
+    if fn_t is None or fn_t.numel() == 0:
+        return {"error": "fn unavailable"}
+
+    def _column(key):
+        return np.asarray(batch[key].detach().cpu().numpy(), dtype=float).ravel()
+
+    fn, fs, tpf = _column("fn"), _column("fs"), _column("tpf")
+    # fs also has to be positive: it is the frequency-to-bin map of every notch.
+    keep = np.isfinite(fn) & np.isfinite(fs) & np.isfinite(tpf) & (fs > 0)
+    if not keep.any():
+        return {"error": "fn unavailable"}
+    if not keep.all():
+        batch = _subset_batch(batch, keep)
+        labels = np.asarray(labels)[keep]
+        fn, fs, tpf = fn[keep], fs[keep], tpf[keep]
+
+    result = degradation.run_band_notch_contrast(
+        model, batch, labels, fs=fs, fn=fn, tpf=tpf
+    )
+    # Reported unconditionally so a reader can tell "no windows dropped" from
+    # "this manifest predates the check".
+    result["n_windows_dropped_nonfinite"] = int((~keep).sum())
+    return result
 
 
 def main(argv=None) -> int:
@@ -192,6 +257,12 @@ def main(argv=None) -> int:
         "self_check": self_check,
         "artifacts": artifacts,
         "errors": errors,
+    }
+
+    # A paired contrast, not a graded sweep, so it is a SIBLING of "fuzzers" and
+    # never nested inside it (the back-compat test asserts exactly that).
+    manifest["contrasts"] = {
+        "band_notch": _safe("band_notch", lambda: _band_notch_contrast(model, batch, labels))
     }
     manifest_path = out_dir / "fuzz_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, default=float), encoding="utf-8")

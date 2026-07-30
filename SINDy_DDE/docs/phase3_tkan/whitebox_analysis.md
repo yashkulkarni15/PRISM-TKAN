@@ -19,7 +19,9 @@
                 tau_sweep_table, tau_argmax, tau_physical,
                 weight_share_xdelay, weight_share_xt, weight_share_hprev,
                 fig_tau_sweep, fig_attr_spectrum, tpf_band_energy_frac,
-                tsr_table, tsr_delay_share_gain, tsr_windows, tsr_steps
+                tsr_table, tsr_delay_share_gain, tsr_windows, tsr_steps,
+                tsr_resolved, tsr_resolved_pct, tsr_peak_lag_resolved,
+                tsr_lock_z_mean, tsr_lock_tested, tsr_lock_pct
     bsplines:   symbolic_table, n_symbolic, frac_linear, frac_nonlinear,
                 fig_top_edges, fig_spline_atlas, fig_feature_bars,
                 fig_edge_importance_named, atlas_table,
@@ -158,10 +160,29 @@ TSR separates time relevance from feature relevance over {{tsr_windows}} windows
 
 {{tsr_table}}
 
-The mean channel-share change from raw IG to TSR is {{tsr_delay_share_gain}}. TSR is a
-channel/time-resolved saliency measure: the delayed channels' share is the observable
-here, while the tau input's causal role is established by the intervention above, not
-by TSR alone.
+The mean absolute channel-share shift from raw IG to TSR is {{tsr_delay_share_gain}}. (The
+*signed* mean is identically zero for any two share vectors and says nothing; the absolute
+shift is the quantity with content.) TSR is a channel/time-resolved saliency measure: the
+delayed channels' share is the observable here, while the tau input's causal role is
+established by the intervention above, not by TSR alone.
+
+**Reading the peak lag.** `TR peak lag` is a global argmax of the relevance autocorrelation
+over lags [2, N/2]. When that autocorrelation decays monotonically -- no periodicity present
+-- the argmax returns the search floor of 2, which looks like a measured lag but means "no
+peak resolved". Here **{{tsr_resolved}} windows ({{tsr_resolved_pct}}%) resolved a peak**;
+their mean peak lag is {{tsr_peak_lag_resolved}}. Any peak-lag figure quoted without that
+fraction beside it is not interpretable.
+
+**Delay lock (argmax-free).** For each window the autocorrelation *at lag tau* is scored
+against the spread of autocorrelations at every other searched lag, so there is no boundary
+to pin against and the physical delay is tested directly. Mean z over the
+{{tsr_lock_tested}} testable windows is {{tsr_lock_z_mean}}, with {{tsr_lock_pct}}% above
+the z > 2 decision rule.
+
+> **Caveat that gates any positive reading.** The delayed channel is constructed by shifting
+> the signal by tau, so a lag-tau autocorrelation bump may be an artifact of that construction
+> rather than anything the network learned. Until the untrained-checkpoint and wrong-tau
+> controls return, a high lock score is not evidence about the model.
 
 ---
 

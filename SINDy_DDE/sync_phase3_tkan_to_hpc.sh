@@ -145,7 +145,7 @@ for t in \
   test_concept_probe_circularity test_fuzz_phase3_cli test_plot_fuzz_replication \
   test_xai_spectral test_whitebox_tsr_delay_lock test_tsr_control \
   test_cf_monte_carlo test_xai_regenerative test_counterfactuals_phase3_cli \
-  test_activation_modes ; do
+  test_activation_modes test_activation_modes_runner ; do
   rs "tests/$t.py" "$REMOTE:$DEST/tests/"
 done
 

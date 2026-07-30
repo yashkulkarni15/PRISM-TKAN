@@ -74,6 +74,19 @@ def _provenance(*, checkpoints, tag, n_windows, n_seeds, k_sweep, gate_quantile,
     }
 
 
+def _progress(stage: str, done: int, total: int) -> None:
+    """Progress line for `run_activation_mode_analysis`.
+
+    The signature is FIXED by `activation_modes._tick`, which calls
+    `progress(stage, done, total)`. This lived inside `main()` as a one-argument
+    callback and blew up on the first real submission, after loading all five
+    checkpoints -- an expensive way to discover a three-line mismatch. It is
+    module-level now so `tests/test_activation_modes_runner.py` can bind the real
+    function to the real analysis and fail here instead of on the cluster.
+    """
+    print(f"    [{done}/{total}] {stage}", flush=True)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -158,9 +171,6 @@ def main(argv=None) -> int:
 
     print(f"\n{len(models_by_fold)} folds x {args.n_windows} windows, "
           f"{args.n_seeds} untrained seeds, k in {k_sweep}", flush=True)
-
-    def _progress(msg):
-        print(f"  {msg}", flush=True)
 
     # One entry per k, written after EACH k so a wall-clock kill leaves a
     # readable partial sweep rather than nothing. Same lesson as U12-B.

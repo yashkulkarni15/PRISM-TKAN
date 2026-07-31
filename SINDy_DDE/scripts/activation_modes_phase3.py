@@ -206,13 +206,21 @@ def main(argv=None) -> int:
         raise SystemExit(f"ERROR: manifest not written: {path}")
 
     print(f"\nmanifest -> {path}  ({path.stat().st_size} bytes)")
-    print("\nk    verdict                       trained   untrained p95")
-    for k in k_sweep:
-        v = by_k[str(k)].get("verdict") or {}
-        art = v.get("artifact_suspected")
-        state = ("UNDECIDED -- NOT a pass" if art is None
-                 else "ARTIFACT SUSPECTED" if art else "MODES SURVIVE THE NULL")
-        print(f"{k:<4} {state:<29} {v.get('trained_score')}   {v.get('untrained_reference')}")
+    # Verdicts are PER STRATUM. There is no top-level "verdict" key, and asking
+    # for one silently yields {} -> every row prints UNDECIDED with trained=None,
+    # which is what this summary did on its first real run: a reporting bug that
+    # looked exactly like a scientific null.
+    strata = sorted({s for k in k_sweep for s in by_k[str(k)].get("strata", {})})
+    print("\nstratum                 " + "".join(f"k={k:<8}" for k in k_sweep))
+    for st in strata:
+        cells = []
+        for k in k_sweep:
+            v = (by_k[str(k)].get("strata", {}).get(st, {}) or {}).get("verdict") or {}
+            art = v.get("artifact_suspected")
+            cells.append("UNDEC   " if art is None else
+                         "ARTIFACT" if art else "survives")
+        print(f"{st:<23} " + "  ".join(cells))
+    print("\nA verdict that changes with k is a clustering artefact, not a finding.")
     print("\nRead the margin, never the trained score alone: an untrained network "
           "already scores ~0.63 on this measure.")
     return 0

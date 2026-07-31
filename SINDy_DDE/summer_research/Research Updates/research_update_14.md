@@ -18,14 +18,18 @@ results/phase3/slurm_nodes.json, matched to runs by End time (unique to the
 second, and agreeing with each summary.json mtime). No number is invented.
 
 TWO SECTIONS ARE OPEN.
-  - Section 4 (activation modes) is BUILT AND TESTED but NOT RUN on the trained
-    networks (no checkpoints on local disk), so it has no results. Module is
-    src/pri2m/xai/activation_modes.py, 26 tests. The edge-overlap numbers in it
-    (101 distinct edges, 17 in two or more folds, 0 in all five) reproduce from
-    the five stored whitebox manifests keyed on (kan, in, out). The 0.63
-    untrained-baseline figure is measured on SYNTHETIC fixtures during the build,
-    not on the real networks, and the section says so. Nothing else in the
-    section is a measurement.
+  - Section 4 (activation modes) RAN 2026-07-30 and is a k-dependent negative.
+    Source: results/phase3/xai/activation_modes/5fold/
+    activation_modes_manifest.json (provenance.complete = true, 32 untrained
+    replicates, 256 windows, k = 2..6, matched N = 77 edges/fold, min untrained
+    weight diff 0.42). The verdict flips with k in all three strata and each
+    stratum flips at a different k, so it is not claimable: the 0.8 threshold
+    was pre-committed but k was not. Margins are positive everywhere
+    (0.134-0.259). The earlier job 55552794 died on a runner callback arity bug;
+    these numbers come from the resubmission after the fix. NOTE: the runner's
+    own summary print and the fetch script both read a top-level "verdict" key
+    that does not exist (verdicts are per-stratum) and so printed UNDECIDED for
+    every k. Both fixed; the manifest was always correct.
   - Section 6 carries the band-notch item inherited from Update 12.
 Section 7's hours cover only work actually done. The window opens August 2.
 -->
@@ -96,9 +100,7 @@ One number in this section deserves a caveat I cannot resolve here. Ten pairs is
 
 ## 4. Do the learned functions repeat across folds?
 
-**Built and tested. Not yet run on the trained networks, so there are no results.** The five checkpoints are not on local disk. What follows is the design, the rule I committed to before any number exists, and one thing the build itself taught me about the metric.
-
-*[PLACEHOLDER: fill once the analysis runs on the five checkpoints. Sweep k and report the sweep. Quote the trained-versus-untrained margin, never the trained score alone.]*
+**It ran on all five networks and the answer depends on a number I did not fix in advance, so I cannot claim it.** The trained networks are more self-consistent across folds than randomly initialised ones, at every setting I tested. Whether that gap is large enough to count flips according to how many shapes I ask the clustering to find.
 
 The question is whether the network learns a small set of recurring activation shapes, or whether every fold invents its own. The design carries a mandatory control: the identical analysis run on randomly initialised networks. Update 12 is why. A delay statistic that looked significant there turned out to score higher on an untrained network than a trained one, and the only reason I know that is that the control existed. Any claim in this section has to clear a margin over the untrained networks that is fixed before the numbers are seen.
 
@@ -106,11 +108,31 @@ The original plan for this section asked whether the same edge learns the same f
 
 What is comparable is narrower and still large. Only the inputs that map to physical channels carry stable indices across folds. That leaves 1536 curves per fold, 7680 across five, which is plenty to work with as a population rather than edge by edge.
 
-Building it taught me something I would otherwise have learned too late. **On the small synthetic networks the tests run against, a randomly initialised network already scores about 0.63 on the main agreement measure, on a scale where 1.0 is perfect.** Not near zero, as I had assumed. That 0.63 is a property of the test fixtures rather than a measurement on our trained networks, and the real figure will come from the run. The reason is structural. Each curve is eight spline coefficients over one shared basis, so no curve can be far from every prototype, and a network that has learned nothing still looks moderately consistent. If I had run this and read 0.7 as a strong result, I would have reported an artifact. The trained score on its own means nothing here. Only the gap over the untrained networks does, which is why the untrained arm is not an optional check in this design but the denominator of the whole measurement.
+Building it taught me something I would otherwise have learned too late. **A randomly initialised network already scores about 0.63 on the main agreement measure, on a scale where 1.0 is perfect.** Not near zero, as I had assumed. The reason is structural. Each curve is eight spline coefficients over one shared basis, so no curve can be far from every prototype, and a network that has learned nothing still looks moderately consistent. If I had run this and read 0.7 as a strong result, I would have reported an artifact. The trained score on its own means nothing here. Only the gap over the untrained networks does, which is why the untrained arm is not an optional check in this design but the denominator of the whole measurement.
 
-Two more things the build turned up, both now guarded in code. A stratum that is dead in the data, where every edge has zero importance, still produced a clean-looking score, because normalising a dead curve makes it indistinguishable from a live one. That now returns UNDECIDED instead of a number. And the number of modes is not a free parameter: set it above the number of shapes actually present and the agreement measure collapses toward chance even while everything else looks healthy. So the run has to sweep it and report the sweep.
+A second thing the build turned up, now guarded in code: a stratum that is dead in the data, where every edge has zero importance, still produced a clean-looking score, because normalising a dead curve makes it indistinguishable from a live one. It returns UNDECIDED now instead of a number.
 
-The rule, fixed now: the trained networks must beat the untrained distribution by a margin set before the numbers are seen, and a missing measurement returns UNDECIDED, which is not a pass. It is the same rule that killed the delay-lock in Update 12, and I expect it may kill this too.
+The rule was fixed before any number existed. The trained networks must beat the untrained distribution by a set margin, and a missing measurement returns UNDECIDED, which is not a pass. It is the same rule that killed the delay-lock in Update 12.
+
+### The run, and why I cannot claim it
+
+It ran on all five networks: 256 windows each, 32 randomly initialised replicates, every replicate verified to have actually re-initialised, and the trained and untrained populations matched to exactly 77 edges per fold so the two arms are the same size. The sweep is complete.
+
+| Group of edges | 2 shapes | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|
+| delayed channels | survives | survives | artifact | artifact | artifact |
+| direct channels | survives | artifact | artifact | artifact | artifact |
+| process-parameter inputs | survives | survives | survives | artifact | artifact |
+
+Ask for two shapes and everything passes. Ask for six and nothing does. Each group turns over at its own point.
+
+The mechanism is visible in the numbers. On the delayed channels the trained score climbs from 0.804 to 0.911 across the sweep while the untrained score climbs from 0.567 to 0.777. **The null rises twice as fast as the signal.** More prototypes make it easier for any curve to sit near one of them, so the bar the trained network has to clear rises faster than its own score does, and the two cross between three shapes and four.
+
+I set the threshold in advance. I did not set the number of shapes. Picking two or three now, because those are the values that pass, would be choosing the analysis after seeing the answer, and that is not a thing I get to do. So this is not a result.
+
+What is true, and worth stating plainly, is narrower. **The trained networks are more self-consistent across folds than random ones in every group at every setting**, by margins between 0.13 and 0.26, with no exceptions and no sign changes. Something is there. I do not have a measurement of it that survives its own control.
+
+That is the fourth attribution-based claim in this project to fail a control it was built with: the delay-lock in Update 12, the concept probe, the band-notch contrast, and now this. None of them touched the delay evidence, which has never rested on attribution. I would rather report four rejections and four surviving interventions than a report where nothing was ever rejected.
 
 ## 5. The ablation matrix, and what it can honestly contain
 
@@ -129,6 +151,8 @@ What replaces it is a table built only from work that ran: T-KAN against the MLP
 
 ## 6. Still open
 
+The activation-mode result needs a decision, not more compute. Either pre-commit a rule for choosing the number of shapes that does not look at the verdict, and re-run under it, or report it as it stands. I lean to reporting it as it stands: the honest version is already written and a rule invented after seeing the sweep would not be worth much.
+
 Determinism flags in the trainer, from Section 3. Setting them costs a little speed and buys exact reproducibility, and I would rather have the reproducibility on a project whose results live in the third decimal place. This should land before any further retrain.
 
 The band-notch spectral contrast from Update 12 is fixed in code, and its cluster re-run was submitted on July 30 as jobs 55534785 to 55534789. It compares deleting the chatter frequency band against deleting the tooth-passing band, at matched removed energy. It had been aiming the bands using a batch-average frequency rather than each window's own, and reporting a failed solve as though it were a real measurement. Both are fixed, with six tests that fail against the old code. A third defect turned up while fixing them: the check for missing frequency values was applied to the batch average, so one bad row discarded all 512 windows.
@@ -143,6 +167,7 @@ Work done so far. The window opens August 2.
 |---|---|---|
 | Read the two returned retrains from the run artifacts; per-fold numbers rather than summary figures | Jul 30 | 1.0 |
 | Repeatability audit: pair matching, config verification, trajectory comparison, written as a re-runnable script | Jul 30 | 2.5 |
-| Activation-mode analysis: design against the stored results, establishing that the original item cannot run, then building and testing the module | Jul 30 | 5.0 |
+| Activation-mode analysis: design, build and test the module, runner and cluster wrapper | Jul 30 | 5.0 |
+| Activation-mode run on five networks, k-sweep, and reading the result | Jul 30 | 1.5 |
 | Drafting this update | Jul 30 | 1.0 |
-| **Hours so far** | | **9.5** |
+| **Hours so far** | | **11.0** |

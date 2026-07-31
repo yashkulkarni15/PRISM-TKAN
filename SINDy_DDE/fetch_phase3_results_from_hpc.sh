@@ -61,7 +61,12 @@ fi
 #    carries Monte Carlo survival and, when run with DICE=1, the DiCE arm).
 # --------------------------------------------------------------------------- #
 echo; echo ">>> [4/4] U13 results (regenerative + counterfactuals)"
-for sub in regenerative counterfactuals activation_modes; do
+# The whitebox fold manifests are the source for the cross-fold edge overlap,
+# the randomization-sanity number and several update figures. They were absent
+# from this list until 2026-07-30, when a local `rm -rf SINDy_DDE` during a
+# branch rebuild deleted them and nothing here could bring them back.
+for sub in regenerative counterfactuals activation_modes \
+           fold0 fold1 fold2_w512 fold3 fold4 conformal concept_probes; do
   if ssh -o ControlPath="$CTRL" "$REMOTE" "test -d '$DEST/results/phase3/xai/$sub'"; then
     rs "$REMOTE:$DEST/results/phase3/xai/$sub/" "results/phase3/xai/$sub/"
   else
@@ -101,13 +106,14 @@ for p in sorted(glob.glob("results/phase3/xai/activation_modes/*/activation_mode
     if not done:
         print("    *** PARTIAL SWEEP -- a manifest is written after every k, so"
               " presence alone proves nothing ***")
-    for k in sorted(by_k, key=int):
-        v = (by_k[k].get("verdict") or {})
-        art = v.get("artifact_suspected")
-        state = ("UNDECIDED (NOT a pass)" if art is None
-                 else "ARTIFACT SUSPECTED" if art else "MODES SURVIVE")
-        print(f"    k={k}: {state}  trained={v.get('trained_score')}"
-              f"  untrained_p95={v.get('untrained_reference')}")
+    # Verdicts are PER STRATUM; there is no top-level "verdict" key.
+    for st in sorted({s for k in by_k for s in by_k[k].get("strata", {})}):
+        cells = []
+        for k in sorted(by_k, key=int):
+            v = ((by_k[k].get("strata", {}).get(st) or {}).get("verdict") or {})
+            a = v.get("artifact_suspected")
+            cells.append(f"k{k}=" + ("UNDEC" if a is None else "ARTIFACT" if a else "survives"))
+        print(f"    {st:<22} " + "  ".join(cells))
 
 for p in sorted(glob.glob("results/phase3/xai/counterfactuals/*manifest.json")):
     pooled = json.load(open(p)).get("pooled", {})

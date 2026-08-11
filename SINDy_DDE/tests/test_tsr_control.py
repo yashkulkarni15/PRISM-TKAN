@@ -104,7 +104,12 @@ def test_verdict_flags_an_artifact_when_the_untrained_net_locks_just_as_hard():
 
 
 def test_verdict_clears_the_lock_when_training_is_what_produces_it():
-    verdict = W.tsr_control_verdict(trained_lock=3.0, untrained_lock=0.2, threshold=0.8)
+    # n_lock_tested is supplied because a clear now requires it, and because the
+    # real caller supplies it (whitebox_phase3.py:510). Omitting it here was
+    # what let the earlier version return a definitive clear on no stated
+    # evidence at all.
+    verdict = W.tsr_control_verdict(trained_lock=3.0, untrained_lock=0.2,
+                                    threshold=0.8, n_lock_tested=24)
     assert verdict["artifact_suspected"] is False
     assert verdict["lock_gain_over_untrained"] > 2.5
 
@@ -120,6 +125,138 @@ def test_verdict_treats_a_missing_lock_as_undecided_not_as_a_pass():
 def test_verdict_flags_an_artifact_when_the_untrained_net_locks_harder():
     v = W.tsr_control_verdict(trained_lock=0.5, untrained_lock=2.5, threshold=0.8)
     assert v["artifact_suspected"] is True
+
+
+# --- the three checks the rule as *written* requires (added 2026-08-02) --------
+#
+# U12 section 4 recorded that the implementation was the ratio test alone, and
+# that three things the pre-committed rule depends on were missing. A "cleared"
+# verdict is the dangerous outcome, because it promotes TSR to a fourth line of
+# delay evidence. These pin that a clear can only be reached on evidence that
+# supports one. UNDECIDED is never a pass.
+
+
+def test_a_trained_lock_that_is_not_a_lock_cannot_clear():
+    """A trained value indistinguishable from noise must not read as learned.
+
+    Ratio test alone: untrained 0.05 < 0.8 * 0.10, so the old rule returned
+    False and printed the fourth-line-of-evidence claim off two non-locks.
+    """
+    v = W.tsr_control_verdict(trained_lock=0.10, untrained_lock=0.05,
+                              threshold=0.8, n_lock_tested=24,
+                              lock_z_threshold=2.0)
+    assert v["artifact_suspected"] is None
+    assert v["undecided_reason"] == "trained_lock_not_significant"
+
+
+def test_a_trained_lock_pointing_the_wrong_way_cannot_clear():
+    v = W.tsr_control_verdict(trained_lock=-3.0, untrained_lock=0.1,
+                              threshold=0.8, n_lock_tested=24)
+    assert v["artifact_suspected"] is None
+
+
+def test_one_window_cannot_carry_a_definitive_verdict():
+    """Under-powered is undecided in BOTH directions, not just the clear."""
+    cleared = W.tsr_control_verdict(trained_lock=3.0, untrained_lock=0.2,
+                                    threshold=0.8, n_lock_tested=1)
+    assert cleared["artifact_suspected"] is None
+    assert cleared["undecided_reason"] == "insufficient_windows"
+    flagged = W.tsr_control_verdict(trained_lock=2.0, untrained_lock=1.9,
+                                    threshold=0.8, n_lock_tested=1)
+    assert flagged["artifact_suspected"] is None
+
+
+def test_a_clear_requires_the_lock_to_be_specific_to_this_windows_tau():
+    """The shuffled arm was computed at full cost and then ignored.
+
+    A lock that is no stronger at the true tau than at a permuted one is
+    reporting the smoothness of the attribution curve, not the delay.
+    """
+    v = W.tsr_control_verdict(trained_lock=3.0, untrained_lock=0.2,
+                              threshold=0.8, n_lock_tested=24,
+                              shuffled_lock=3.1)
+    assert v["artifact_suspected"] is None
+    assert v["undecided_reason"] == "not_tau_specific"
+    still_clear = W.tsr_control_verdict(trained_lock=3.0, untrained_lock=0.2,
+                                        threshold=0.8, n_lock_tested=24,
+                                        shuffled_lock=0.9)
+    assert still_clear["artifact_suspected"] is False
+
+
+def test_the_shuffled_arm_is_recorded_even_when_it_does_not_change_the_verdict():
+    v = W.tsr_control_verdict(trained_lock=2.81, untrained_lock=4.62,
+                              threshold=0.8, n_lock_tested=24,
+                              shuffled_lock=0.88)
+    assert v["shuffled_lock"] == 0.88
+    assert v["tau_specific"] is True
+
+
+def test_an_unknown_window_count_cannot_clear_the_lock():
+    """Same principle the lock arms already follow, applied to the evidence count.
+
+    ``min_windows`` was skipped entirely when ``n_lock_tested`` was not supplied,
+    so a caller that forgot it got a definitive clear with nothing establishing
+    how much evidence stood behind it. A missing measurement must read as
+    UNDECIDED, never as a pass.
+    """
+    v = W.tsr_control_verdict(trained_lock=3.0, untrained_lock=0.2,
+                              shuffled_lock=0.1, n_lock_tested=None)
+
+    assert v["artifact_suspected"] is None
+    assert v["undecided_reason"] == "window_count_unknown"
+
+
+def test_an_unknown_window_count_still_permits_the_artifact_call():
+    """The conservative outcome does not need the count to stand."""
+    v = W.tsr_control_verdict(trained_lock=2.0, untrained_lock=1.9,
+                              n_lock_tested=None)
+
+    assert v["artifact_suspected"] is True
+
+
+def test_a_shuffled_arm_just_below_the_trained_one_is_not_tau_specific():
+    """A hairline gap is not specificity.
+
+    ``tau_specific`` was a bare ``trained > shuffled``, so a shuffled lock a
+    ten-thousandth below the trained one satisfied it and permitted a clear. The
+    shuffled arm now has to sit as far below the trained lock as the untrained
+    arm does -- the same ratio, rather than a second invented constant.
+    """
+    v = W.tsr_control_verdict(trained_lock=3.0, untrained_lock=0.2,
+                              shuffled_lock=2.9999, n_lock_tested=24)
+
+    assert v["tau_specific"] is False
+    assert v["artifact_suspected"] is None
+    assert v["undecided_reason"] == "not_tau_specific"
+
+
+def test_a_genuinely_specific_shuffled_arm_still_reads_as_specific():
+    """The real fold2_w512 values must keep their recorded reading."""
+    v = W.tsr_control_verdict(trained_lock=2.811570240129822,
+                              untrained_lock=0.2,
+                              shuffled_lock=0.8782125023974482,
+                              n_lock_tested=24)
+
+    assert v["tau_specific"] is True
+
+
+def test_returned_run_gives_the_same_verdict_under_the_corrected_rule():
+    """Regression pin on the real fold2_w512 result (GL job 55408255).
+
+    Values are from results/phase3/xai/tsr_control/fold2_w512/
+    tsr_control_manifest.json, provenance.complete = true. U12 section 4 states
+    that applying the rule as written changes nothing here. This is that claim,
+    executable.
+    """
+    v = W.tsr_control_verdict(
+        trained_lock=2.811570240129822,      # lock_z_mean, trained_true_tau
+        untrained_lock=4.615321031499511,    # lock_z_mean, untrained_true_tau
+        threshold=0.8,
+        shuffled_lock=0.8782125023974482,    # lock_z_mean, trained_shuffled_tau
+        n_lock_tested=24,
+    )
+    assert v["artifact_suspected"] is True
+    assert v["undecided_reason"] is None
 
 
 def test_control_result_carries_the_verdict():

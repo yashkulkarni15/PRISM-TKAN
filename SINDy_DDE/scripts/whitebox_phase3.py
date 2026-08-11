@@ -342,7 +342,10 @@ def tsr_aggregate(per_window: list[dict], steps: int) -> dict:
     }
 
 
-def tsr_control_verdict(trained_lock, untrained_lock, threshold: float = 0.8) -> dict:
+def tsr_control_verdict(trained_lock, untrained_lock, threshold: float = 0.8,
+                        *, shuffled_lock=None, n_lock_tested=None,
+                        min_windows: int = 8,
+                        lock_z_threshold: float = 2.0) -> dict:
     """Did training produce the delay-lock, or did the input construction?
 
     The delayed channel is the signal shifted by tau, so a lag-tau bump in the
@@ -353,27 +356,89 @@ def tsr_control_verdict(trained_lock, untrained_lock, threshold: float = 0.8) ->
     ``artifact_suspected`` is ``True`` when the untrained lock reaches
     ``threshold`` of the trained lock (default 80%), and **None when either side
     is unmeasurable** -- a missing measurement must never read as "cleared".
+
+    The rule as pre-committed has three parts beyond that ratio, all of which
+    guard the *clear*, because a clear is what would promote TSR to a fourth
+    line of delay evidence (U12 section 4, where the gap between the rule as
+    written and the rule as implemented is recorded):
+
+    ``lock_z_threshold``
+        the trained side must itself be a lock. A trained value indistinguishable
+        from noise, or pointing the wrong way, cannot clear -- there is no effect
+        to attribute to training. Returns UNDECIDED.
+    ``min_windows``
+        a definitive verdict needs evidence behind it. Below ``min_windows``
+        testable windows the result is UNDECIDED in **both** directions, since a
+        single window should not settle this either way.
+    ``shuffled_lock``
+        the trained net at permuted taus. A lock no stronger at the true tau
+        than at someone else's is reading the smoothness of the attribution
+        curve rather than the delay, so it cannot clear. Note this separates
+        "this window's tau" from "any lag"; it does **not** separate learned
+        from built-in, which only the untrained arm does.
+
+    UNDECIDED carries ``undecided_reason`` so a caller never has to infer why.
     """
+    out = {
+        "trained_lock": trained_lock,
+        "untrained_lock": untrained_lock,
+        "shuffled_lock": shuffled_lock,
+        "lock_gain_over_untrained": None,
+        "threshold": float(threshold),
+        "min_windows": int(min_windows),
+        "lock_z_threshold": float(lock_z_threshold),
+        "n_lock_tested": n_lock_tested,
+        "tau_specific": None,
+        "artifact_suspected": None,
+        "undecided_reason": None,
+    }
     if trained_lock is None or untrained_lock is None:
-        return {
-            "trained_lock": trained_lock,
-            "untrained_lock": untrained_lock,
-            "lock_gain_over_untrained": None,
-            "threshold": float(threshold),
-            "artifact_suspected": None,
-        }
+        out["undecided_reason"] = "unmeasurable_lock"
+        return out
+
     trained_lock, untrained_lock = float(trained_lock), float(untrained_lock)
+    out["trained_lock"], out["untrained_lock"] = trained_lock, untrained_lock
+    out["lock_gain_over_untrained"] = trained_lock - untrained_lock
+    if shuffled_lock is not None:
+        out["shuffled_lock"] = float(shuffled_lock)
+        # The same ratio the untrained arm is held to, rather than a bare ">".
+        # A shuffled lock a hair below the trained one is not tau-specificity,
+        # and reusing the ratio avoids inventing a second constant.
+        out["tau_specific"] = bool(
+            float(shuffled_lock) < float(threshold) * abs(trained_lock)
+        )
+
+    if n_lock_tested is None:
+        # Applies to the clear only (see below): how much evidence stands behind
+        # the numbers is itself a measurement, and a missing one must not read
+        # as a pass -- the rule the lock arms above already follow.
+        out["undecided_reason"] = "window_count_unknown"
+    elif int(n_lock_tested) < int(min_windows):
+        out["undecided_reason"] = "insufficient_windows"
+        return out
+
     # Compare against |trained|: a trained lock at or below zero carries no
     # signal to attribute, so any untrained lock at all is disqualifying.
     ref = abs(trained_lock)
     suspected = untrained_lock >= float(threshold) * ref if ref > 0 else True
-    return {
-        "trained_lock": trained_lock,
-        "untrained_lock": untrained_lock,
-        "lock_gain_over_untrained": trained_lock - untrained_lock,
-        "threshold": float(threshold),
-        "artifact_suspected": bool(suspected),
-    }
+
+    # The gates below can only block a *clear*. An artifact call is the
+    # conservative outcome and stands on the ratio alone.
+    if not suspected:
+        if out["undecided_reason"] == "window_count_unknown":
+            return out
+        if trained_lock < float(lock_z_threshold):
+            out["undecided_reason"] = "trained_lock_not_significant"
+            return out
+        if out["tau_specific"] is False:
+            out["undecided_reason"] = "not_tau_specific"
+            return out
+
+    # Reached only on an artifact call or a clear that passed every gate, so any
+    # provisional reason recorded above does not apply to the outcome.
+    out["undecided_reason"] = None
+    out["artifact_suspected"] = bool(suspected)
+    return out
 
 
 def run_tsr_control(trained_model, untrained_model, batch, esl, labels,
@@ -432,10 +497,17 @@ def run_tsr_control(trained_model, untrained_model, batch, esl, labels,
         pair = ("trained_true_tau", "untrained_true_tau")
         verdict = None
         if all(k in done for k in pair):
+            # The shuffled arm lands last and may be absent on a partial
+            # snapshot; the rule treats a missing one as "not consulted"
+            # rather than as a pass, so a checkpoint verdict can only be
+            # more conservative than the final one.
+            shuffled_done = done.get("trained_shuffled_tau")
             verdict = tsr_control_verdict(
                 done["trained_true_tau"]["lock_z_mean"],
                 done["untrained_true_tau"]["lock_z_mean"],
                 threshold=threshold,
+                shuffled_lock=(shuffled_done or {}).get("lock_z_mean"),
+                n_lock_tested=done["trained_true_tau"].get("n_lock_tested"),
             )
         return {"conditions": dict(done), "verdict": verdict}
 

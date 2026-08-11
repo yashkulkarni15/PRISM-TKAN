@@ -250,8 +250,11 @@ def main(argv: list[str] | None = None) -> int:
               f"lock_z_mean {cond['lock_z_mean']}")
     print(f"\ntrained lock   {v['trained_lock']}")
     print(f"untrained lock {v['untrained_lock']}   (threshold {v['threshold']})")
+    print(f"shuffled lock  {v['shuffled_lock']}   "
+          f"(tau_specific {v['tau_specific']})")
+    print(f"windows tested {v['n_lock_tested']}   (minimum {v['min_windows']})")
     if v["artifact_suspected"] is None:
-        print("VERDICT: UNDECIDED -- a lock was not measurable on one side. "
+        print(f"VERDICT: UNDECIDED -- {v['undecided_reason']}. "
               "This is NOT a pass; do not claim TSR either way.")
     elif v["artifact_suspected"]:
         print("VERDICT: ARTIFACT SUSPECTED -- the untrained net locks comparably. "

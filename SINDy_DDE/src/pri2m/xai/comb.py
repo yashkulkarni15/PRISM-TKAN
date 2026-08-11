@@ -59,6 +59,7 @@ __all__ = [
     "chatter_attenuation",
     "expected_chatter_attenuation",
     "measure_pair_response",
+    "peak_alignment",
     "aggregate_comb",
 ]
 
@@ -217,6 +218,37 @@ def measure_pair_response(phi_inst, phi_delay, tau: int, f_over_tpf,
         out[i] = 2.0 * abs(proj) / (s.size * max(amplitude, 1e-12))
 
     return out if out.size > 1 else out
+
+
+# Below this multiple of the tooth-pass frequency the response is the DC lobe,
+# which is not a passband of the comb. A nonlinear edge rectifies, so the
+# composed signal can carry a large constant term; a global argmax then returns
+# f = 0, and because 0 is an integer a "distance to nearest harmonic" test scores
+# it as a hit. Measured on the real probe: 44 of 125 pairs peaked at DC.
+_DC_LOBE_MAX_RATIO = 0.25
+
+
+def peak_alignment(f_over_tpf, response, min_ratio: float = _DC_LOBE_MAX_RATIO) -> dict:
+    """Where a measured response peaks, and whether that is a tooth-pass harmonic.
+
+    The DC lobe is excluded from the search rather than from the reported curve:
+    the comb claim is about the *periodic* structure, and a constant offset is
+    neither evidence for it nor against it.
+    """
+    f = np.asarray(f_over_tpf, dtype=float)
+    r = np.asarray(response, dtype=float)
+    keep = f >= float(min_ratio)
+    if not keep.any():
+        return {"peak_ratio": None, "distance_to_nearest_harmonic": None,
+                "on_harmonic": None, "min_ratio": float(min_ratio)}
+    peak = float(f[keep][int(np.argmax(r[keep]))])
+    dist = abs(peak - round(peak))
+    return {
+        "peak_ratio": peak,
+        "distance_to_nearest_harmonic": float(dist),
+        "on_harmonic": bool(dist <= 0.1),
+        "min_ratio": float(min_ratio),
+    }
 
 
 def _usable(row: dict) -> bool:

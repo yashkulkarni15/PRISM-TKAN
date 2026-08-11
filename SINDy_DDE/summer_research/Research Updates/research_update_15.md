@@ -32,7 +32,7 @@ HOURS in Section 7 are an ESTIMATE and need checking before this is sent.
 This cycle asks what the delayed input is actually used for, and answers it with a filter.
 
 - **The delay coupling is a comb filter tuned to the tooth-passing frequency.** Update 13 found that the network pairs each delayed input with a scaled copy of its instantaneous partner, and recorded that as a failed hypothesis. It is not a failure. That pairing is a delay-and-add filter whose passbands land on the tooth-pass frequency and its harmonics.
-- **Training does not build the filter. It chooses which way the filter points.** Randomly initialised networks already form the same comb, but with the sign decided by a coin flip. Trained networks reinforce the tooth-passing family in 114 of 125 measured cases; untrained ones are statistically indistinguishable from chance.
+- **Training does not build the filter. It chooses which way the filter points.** Randomly initialised networks already form the same comb, but with the sign decided by a coin flip. Trained networks reinforce the tooth-passing family in 110 of 125 measured cases; untrained ones land at 64 of 125, which is chance.
 - **The prediction was confirmed by direct measurement** on all five networks, agreeing to a correlation of 0.993 or better.
 - **Three naming and logic defects were fixed** before they could reach a written methods section.
 - **Next:** the reproducibility test is queued behind a shared cluster limit, and the noise floor it feeds is the gate on every remaining comparison.
@@ -65,23 +65,25 @@ For each of the top 25 pairs in each network I drove the two learned functions w
 
 | Network | Peaks on a tooth-pass harmonic | Untrained control | Agreement with prediction |
 |---|---|---|---|
-| 0 | 0.920 | 0.640 | 0.9974 |
-| 1 | 0.920 | 0.600 | 0.9962 |
-| 2 | 0.920 | 0.640 | 0.9975 |
-| 3 | 0.960 | 0.520 | 0.9958 |
+| 0 | 0.920 | 0.600 | 0.9974 |
+| 1 | 0.840 | 0.520 | 0.9962 |
+| 2 | 0.880 | 0.520 | 0.9975 |
+| 3 | 0.920 | 0.440 | 0.9958 |
 | 4 | 0.840 | 0.480 | 0.9928 |
 
 The predicted and measured responses agree to a correlation of 0.993 or better on every network, so the reading in Section 2 describes the real learned functions.
 
-**The control is the more interesting column.** Pooled, trained pairs peak on a tooth-passing harmonic in 114 of 125 cases and untrained pairs in 72 of 125. That untrained figure is not distinguishable from a coin toss, at p equal to 0.107.
+**The control is the more interesting column.** Pooled, trained pairs peak on a tooth-passing harmonic in 110 of 125 cases and untrained pairs in 64 of 125. That untrained figure is a coin toss, at p equal to 0.86.
 
-A coin toss is the right comparison, and this is the part that changes the claim. At random initialisation the two curves of a pair are both close to straight lines, and any two straight lines are almost perfectly proportional. So an untrained network already forms this filter. What it does not have is a preferred direction: half its pairs reinforce the tooth-passing family and half cancel it. Against that baseline the trained networks reinforce 114 times out of 125, at p equal to 5 times ten to the minus 23.
+A coin toss is the right comparison, and this is the part that changes the claim. At random initialisation the two curves of a pair are both close to straight lines, and any two straight lines are almost perfectly proportional. So an untrained network already forms this filter. What it does not have is a preferred direction: half its pairs reinforce the tooth-passing family and half cancel it. Against that baseline the trained networks reinforce 110 times out of 125, at p equal to 2 times ten to the minus 19.
 
 So the honest claim is narrower than "the network built a filter", and stronger for being narrower:
 
 > The delay-and-add structure comes from the architecture. What training decides is the sign, and training reliably chooses to reinforce the tooth-passing family rather than cancel it.
 
 ![Swept response of the strongest delay pair in each network. Blue is measured by driving the learned functions with pure tones, red dashed is predicted from the stored correlation and gain, and grey is the same measurement on a randomly initialised copy. Blue and red coincide everywhere. The grey curve is a filter of the same shape, but on four of the five networks it is inverted, peaking exactly where the trained one cancels. That inversion is the whole finding: the shape is architecture, the direction is learned.](../../results/figures/research_update_assets/comb_probe_all_folds.png){width=100%}
+
+**A defect in my own measure, found and corrected before it reached you.** The first version of this table took the highest point of each measured response and asked whether it sat on a tooth-passing harmonic. A shaped edge produces a constant offset as well as a tone, and for 44 of the 125 pairs that constant was the highest point. Because zero counts as a whole number, those were scored as hits. Excluding the constant term lowers the trained figure from 0.912 to 0.880 and the untrained one from 0.576 to 0.512. The conclusion is unchanged and the control is cleaner for it, since 0.512 is a coin toss by any reading. The numbers above are the corrected ones.
 
 **Where the measurement disagrees with the prediction.** The median agreement of 0.996 hides a tail. Four of the 125 pairs measured below 0.90 against their prediction, one of them strongly negative, and all four sit on the same gate and the same input channel, so this is systematic rather than noise. Two of the four fall below the proportionality threshold that Section 2 requires, which means the analysis already declines to describe them and the measurement agrees it should. The other two clear that threshold and still disagree. Disagreement runs at 12.5 percent below the threshold against 1.8 percent above it, so the threshold helps without being sufficient.
 

@@ -54,10 +54,12 @@ from pri2m.xai.comb import (  # noqa: E402
     comb_metrics,
     comb_response,
     measure_pair_response,
+    peak_alignment,
 )
 
 DEFAULT_OUT = pathlib.Path("results/phase3/xai/comb")
 DEFAULT_FIG = pathlib.Path("results/figures/research_update_assets")
+_DC_NOTE = 0.25
 
 
 def _load_model_args(args) -> argparse.Namespace:
@@ -138,11 +140,11 @@ def probe_model(model, pairs, tau: int, ratios, label: str) -> list[dict]:
             "measured": [float(v) for v in measured],
             "measured_normalised": [float(v) for v in norm],
             # Where the measured response peaks, in tooth-pass units. The comb
-            # claim is that this lands on an integer.
-            "peak_ratio": float(ratios[int(np.argmax(measured))]) if measured.size else None,
-            "distance_to_nearest_harmonic": float(
-                abs(ratios[int(np.argmax(measured))] - round(ratios[int(np.argmax(measured))]))
-            ) if measured.size else None,
+            # claim is about the PERIODIC structure, so the DC lobe is excluded
+            # from the search: a nonlinear edge rectifies, and a global argmax
+            # then returns f = 0, which a distance-to-nearest-harmonic test
+            # scores as a hit because 0 is an integer.
+            **peak_alignment(ratios, measured),
         })
     return rows
 
@@ -228,7 +230,8 @@ def main(argv: list[str] | None = None) -> int:
         d = [r["distance_to_nearest_harmonic"] for r in rows
              if r.get("distance_to_nearest_harmonic") is not None]
         return {"n": len(d), "median_distance_to_harmonic": float(np.median(d)) if d else None,
-                "frac_within_0_1": float(np.mean([x <= 0.1 for x in d])) if d else None}
+                "frac_within_0_1": float(np.mean([x <= 0.1 for x in d])) if d else None,
+                "dc_lobe_excluded_below": _DC_NOTE}
 
     out = {
         "analysis": "swept confirmation of the tooth-pass comb reading",

@@ -264,6 +264,49 @@ def test_measured_response_isolates_the_fundamental_from_harmonics():
     assert np.isfinite(measured).all()
 
 
+def test_peak_alignment_ignores_the_dc_lobe():
+    """DC is not a tooth-pass harmonic, and it was being counted as one.
+
+    A nonlinear edge rectifies, so the composed response can carry a large
+    constant term. Taking a global argmax then returns f = 0, and because 0 is
+    an integer a "distance to nearest harmonic" test scored it as a hit. On the
+    real probe that happened for 44 of 125 pairs, inflating the headline.
+    """
+    from pri2m.xai.comb import peak_alignment
+
+    ratios = np.linspace(0.0, 3.0, 241)
+    # A comb that notches the harmonics, sitting on a huge DC pedestal.
+    response = comb_response(-0.9, ratios)
+    response[0] = 100.0
+
+    out = peak_alignment(ratios, response)
+
+    assert out["peak_ratio"] != 0.0, "the DC lobe must not win the peak search"
+    assert out["on_harmonic"] is False, "this comb peaks between harmonics"
+
+
+def test_peak_alignment_finds_a_genuine_harmonic_peak():
+    from pri2m.xai.comb import peak_alignment
+
+    ratios = np.linspace(0.0, 3.0, 241)
+
+    out = peak_alignment(ratios, comb_response(0.9, ratios))
+
+    assert out["on_harmonic"] is True
+    assert abs(out["peak_ratio"] - round(out["peak_ratio"])) <= 0.1
+
+
+def test_peak_alignment_reports_the_distance_it_judged_on():
+    from pri2m.xai.comb import peak_alignment
+
+    ratios = np.linspace(0.0, 3.0, 241)
+
+    out = peak_alignment(ratios, comb_response(0.9, ratios))
+
+    assert out["distance_to_nearest_harmonic"] <= 0.1
+    assert out["min_ratio"] > 0
+
+
 def test_a_dead_delayed_edge_measures_as_flat():
     from pri2m.xai.comb import measure_pair_response
 

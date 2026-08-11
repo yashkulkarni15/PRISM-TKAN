@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Figure for Research Update 14, Section 3: the repeatability floor.
+"""Figure for Research Update 14, Section 3: the repeatability check.
 
 Every value is read from results/phase3/repeatability.json, which
 scripts/repeatability_audit.py recomputes from the run summaries. Nothing here
@@ -11,8 +11,9 @@ pair that did not is visibly not. Plotting the GAP rather than two AUC curves pe
 fold keeps one measure on one axis: ten overlaid AUC traces across two different
 arms would need either two y-scales or a misleading shared one.
 
-Panel B is what the floor is for. The two effects the July retrains reported sit
-against the largest same-settings gap, and both are inside it.
+Panel B places the two July retrain effects beside the largest observed
+same-settings difference in a selected fold-level AUC. These quantities are
+shown together as a warning, not as a formal noise-floor comparison.
 
 Palette is the project's validated categorical set; both panels carry direct
 labels so identity never rests on colour alone.
@@ -126,7 +127,7 @@ def main(argv=None) -> int:
     ax1.set_ylim(-0.0012, max(worst[0] * 1.18, 0.028))
     _grid(ax1)
 
-    # ---------------- Panel B: the effects against the floor -----------------
+    # ----- Panel B: effects beside the largest selected fold-level gap -------
     floor = rep["repeatability_floor_auc"]
     effects, labels = [], []
     for arm in rep["arms"]:
@@ -141,14 +142,14 @@ def main(argv=None) -> int:
     # Inside the axes, to the right of the rule, vertically centred between the
     # two bars: above the top bar it lands outside the plot area.
     ax2.text(floor + floor * 0.05, (len(effects) - 1) / 2,
-             f"repeatability\nfloor {floor:.4f}",
+             f"largest observed\nfold gap {floor:.4f}",
              color=S2, fontsize=9.5, fontweight="bold", va="center", ha="left")
     ax2.set_yticks(y)
     ax2.set_yticklabels(labels)
     ax2.set_ylim(-0.6, len(effects) - 0.4)
     ax2.set_xlim(0, floor * 1.62)
     ax2.set_xlabel("effect on 5-fold mean AUC")
-    ax2.set_title("Both effects are smaller than the noise", pad=12)
+    ax2.set_title("Effects beside the largest observed fold gap", pad=12)
     _grid(ax2, axis="x")
 
     fig.tight_layout()
@@ -157,7 +158,8 @@ def main(argv=None) -> int:
     plt.close(fig)
     print(f"wrote {path}")
     print(f"  reproduced exactly {n_identical}/{n_identical + n_diverged}, "
-          f"largest single-epoch gap {worst[0]:.4f}, floor {floor:.4f}")
+          f"largest single-epoch gap {worst[0]:.4f}, "
+          f"largest selected fold gap {floor:.4f}")
     return 0
 
 

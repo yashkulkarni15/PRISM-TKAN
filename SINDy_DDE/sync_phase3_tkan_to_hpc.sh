@@ -75,6 +75,7 @@ SCRIPT_FILES=(
   scripts/repair_counterfactual_manifest.py  # offline U13-B comparison repair
   scripts/comb_phase3.py                     # tooth-pass comb reading (no net needed)
   scripts/comb_probe_phase3.py               # swept comb confirmation (CPU-only)
+  scripts/mode_ablation_phase3.py            # U14-B step 8: causal mode ablation
   scripts/stability_lobe_phase3.py           # model-implied stability lobe diagram
   scripts/counterfactuals_phase3.py          # physics-constrained counterfactuals
   scripts/concept_probes_phase3.py           # TCAV-style hidden-state probes
@@ -110,6 +111,7 @@ SLURM_FILES=(
   slurm/run_regenerative_all_folds.sh         # U13-C all 5 checkpoints
   slurm/phase3_activation_modes.sbatch        # U14-B, CPU-only
   slurm/phase3_comb_probe.sbatch              # comb confirmation, `standard` partition
+  slurm/phase3_mode_ablation.sbatch           # U14-B step 8, 1+3k held-out evals per stratum
 )
 
 # Builder inputs (Phase 2/2.5 tables; ~51 MB, unchanged run to run so rsync

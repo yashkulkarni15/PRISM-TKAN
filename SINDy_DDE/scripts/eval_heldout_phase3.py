@@ -130,6 +130,7 @@ def run(
     device: str = "cpu",
     batch_size: int = 64,
     exclude_omega_below: float | None = None,
+    model=None,
 ) -> dict:
     """Score ``checkpoint`` on the held-out features CSV; write + return the result.
 
@@ -159,7 +160,12 @@ def run(
     load_args = argparse.Namespace(
         input_size=None, hidden_size=None, grid_size=5, spline_order=3
     )
-    model = _load_model(checkpoint, load_args, pre)
+    # ``model`` lets a caller score an already-modified network -- the mode
+    # ablation evaluates the same checkpoint several times with different edges
+    # zeroed, and reloading from disk each time would discard the ablation.
+    # Absent, behaviour is exactly as before.
+    if model is None:
+        model = _load_model(checkpoint, load_args, pre)
     model.eval()
     model.to(dev)
 

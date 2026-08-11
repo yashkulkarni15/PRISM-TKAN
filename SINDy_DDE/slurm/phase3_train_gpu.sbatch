@@ -49,6 +49,21 @@
 # Note: EXTRA_ARGS is split on whitespace only, so an individual argument cannot
 # itself contain a space. Unset/empty -> the invocation is exactly as it was.
 #
+# The determinism repeat (Update 14): two submissions of the SAME fold and seed,
+# short, with bitwise-reproducible kernels requested. Bit-identical histories
+# mean the flags fixed it; any divergence means the cause lies elsewhere.
+#   env DETERMINISTIC=1 EXTRA_ARGS="--epochs 5" \
+#       OUTPUT_DIR=$PROJECT_ROOT/results/phase3/runs_determinism \
+#       sbatch --array=0 --time=04:00:00 --export=ALL slurm/phase3_train_gpu.sbatch
+# Submit it twice. --epochs (not --smoke) because --smoke also clamps the window
+# geometry, which would change the kernels being tested.
+# ALWAYS pass --time for a short run. The 36 h default above is sized for a
+# 20-epoch fold; 5 epochs need ~2 h, and asking for 36 h makes the job ineligible
+# for backfill into the gaps that would otherwise run it. This matters most when
+# the account is at its GPU quota (squeue reason AssocGrpGRES), which is a cap on
+# jaabell0's concurrent GPUs shared with the other users on the account -- not a
+# shortage of free A40s, and NOT fixable by changing partition.
+#
 # Partition MUST be spgpu (A40 / sm_86). The `gpu` partition is V100 (sm_70),
 # which the prism torch build has no kernels for -> instant crash. spgpu access
 # under jaabell0 is confirmed.
@@ -78,6 +93,13 @@ SMOKE="${SMOKE:-0}"
 # train_phase3.py invocation (e.g. "--no-side-input", "--severity-mode quantile").
 # Empty by default -> argv is byte-identical to the validated runs.
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+# Bitwise-reproducible kernels. DETERMINISTIC=1 both exports the cuBLAS
+# workspace variable and appends --deterministic, because the two must travel
+# together: cuBLAS reads the variable when it creates its handle, so exporting
+# it after the process starts is too late and the trainer's guard aborts the
+# run. Kept OFF by default -- the variable changes cuBLAS workspace allocation,
+# so exporting it unconditionally would perturb the validated runs.
+DETERMINISTIC="${DETERMINISTIC:-0}"
 
 cd "$PROJECT_ROOT"
 
@@ -91,6 +113,19 @@ export MKL_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 export OPENBLAS_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 # MLflow 3.x requires this opt-in to use a filesystem (`file:`) tracking store.
 export MLFLOW_ALLOW_FILE_STORE=true
+
+# Deterministic runs: export the cuBLAS workspace config BEFORE python starts.
+# Also triggered by a --deterministic that arrived through EXTRA_ARGS, so the
+# flag cannot be passed without its prerequisite and lose a queue slot to a
+# guard abort seconds in.
+DETERMINISTIC_FLAG=()
+if [[ "$DETERMINISTIC" == "1" || "$DETERMINISTIC" == "true" || "$DETERMINISTIC" == "TRUE" ]]; then
+  DETERMINISTIC_FLAG=(--deterministic)
+fi
+if [[ ${#DETERMINISTIC_FLAG[@]} -gt 0 || "$EXTRA_ARGS" == *"--deterministic"* ]]; then
+  export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+  echo "Determinism: on (CUBLAS_WORKSPACE_CONFIG=$CUBLAS_WORKSPACE_CONFIG)"
+fi
 
 echo "=== PRI2M Phase 3 GPU training ==="
 echo "Config:    $CONFIG"
@@ -137,6 +172,7 @@ python scripts/train_phase3.py \
   --device "$DEVICE" \
   --num-workers "$NUM_WORKERS" \
   "${SMOKE_FLAG[@]}" \
+  "${DETERMINISTIC_FLAG[@]}" \
   "${EXTRA_ARGS_ARR[@]}"
 
 echo "Finished: $(date)"

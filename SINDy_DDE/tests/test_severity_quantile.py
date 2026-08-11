@@ -3,7 +3,7 @@
 The severity head/loss is plain point regression; held-out MAE is heavy-tailed.
 ``severity_mode="quantile"`` makes ``SeverityHead`` emit a set of quantiles for
 ``b_over_blim`` (prediction intervals) and routes the regression term through a
-pinball (quantile) loss. ``severity_mode="huber"`` (default) is the current
+pinball (quantile) loss. ``severity_mode="point"`` (default) is the current
 point-regression behavior and MUST be byte-for-byte unchanged.
 """
 
@@ -70,21 +70,21 @@ def test_pinball_loss_nan_safe_zero_weight_and_grad():
 
 
 # --------------------------------------------------------------------------- #
-# SeverityHead: huber (default) unchanged, quantile new path
+# SeverityHead: point (default) unchanged, quantile new path
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("use_kan", [True, False])
-def test_severity_head_huber_default_shapes(use_kan):
+def test_severity_head_point_default_shapes(use_kan):
     torch.manual_seed(0)
-    head = SeverityHead(16, use_kan=use_kan)  # severity_mode defaults to "huber"
+    head = SeverityHead(16, use_kan=use_kan)  # severity_mode defaults to "point"
     out = head(torch.randn(8, 16))
     assert set(out) == {"b_over_blim", "chatter_logit"}
     assert out["b_over_blim"].shape == (8,)
     assert out["chatter_logit"].shape == (8,)
 
 
-def test_severity_head_default_mode_is_huber():
+def test_severity_head_default_mode_is_point():
     head = SeverityHead(8)
-    assert head.severity_mode == "huber"
+    assert head.severity_mode == "point"
 
 
 @pytest.mark.parametrize("use_kan", [True, False])
@@ -171,7 +171,7 @@ def test_severity_loss_quantile_path_uses_pinball():
 # --------------------------------------------------------------------------- #
 # TKANModel wiring
 # --------------------------------------------------------------------------- #
-def test_tkan_model_default_severity_mode_huber():
+def test_tkan_model_default_severity_mode_point():
     model = TKANModel(input_size=4, hidden_size=8)
     out = model(_toy_batch())
     assert set(out) == {"b_over_blim", "chatter_logit"}

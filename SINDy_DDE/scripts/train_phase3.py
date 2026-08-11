@@ -33,6 +33,10 @@ for _p in (str(_SRC), str(_ROOT)):
 import pandas as pd  # noqa: E402  (after sys.path setup)
 
 from pri2m.config import load_config  # noqa: E402
+from pri2m.models.heads import (  # noqa: E402
+    DEFAULT_SEVERITY_MODE,
+    normalise_severity_mode,
+)
 from pri2m.data.phase3_sequence import WindowConfig  # noqa: E402
 from pri2m.training.losses import LossWeights  # noqa: E402
 from pri2m.training.phase3_trainer import TrainConfig, train_one_fold  # noqa: E402
@@ -107,18 +111,26 @@ def _build_train_config(cfg_dict: dict, args: argparse.Namespace) -> TrainConfig
         if args.side_hidden is not None
         else int(cfg_dict.get("side_hidden", 16))
     )
-    severity_mode = (
+    # Normalised here so a pre-rename config or command line ("huber") reaches
+    # TrainConfig -- and therefore summary.json -- as the canonical spelling.
+    severity_mode = normalise_severity_mode(
         args.severity_mode
         if args.severity_mode is not None
-        else str(cfg_dict.get("severity_mode", "huber"))
+        else str(cfg_dict.get("severity_mode", DEFAULT_SEVERITY_MODE))
     )
     severity_quantiles = tuple(
         float(q) for q in cfg_dict.get("severity_quantiles", (0.1, 0.5, 0.9))
     )
+    deterministic = (
+        args.deterministic
+        if args.deterministic is not None
+        else bool(cfg_dict.get("deterministic", False))
+    )
+    epochs = args.epochs if args.epochs is not None else int(cfg_dict.get("epochs", 20))
 
     return TrainConfig(
         model=model,
-        epochs=int(cfg_dict.get("epochs", 20)),
+        epochs=epochs,
         lr=float(cfg_dict.get("lr", 1e-3)),
         batch_size=int(cfg_dict.get("batch_size", 32)),
         seed=int(cfg_dict.get("seed", 0)),
@@ -145,6 +157,7 @@ def _build_train_config(cfg_dict: dict, args: argparse.Namespace) -> TrainConfig
         side_hidden=side_hidden,
         severity_mode=severity_mode,
         severity_quantiles=severity_quantiles,
+        deterministic=deterministic,
     )
 
 
@@ -236,10 +249,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--severity-mode",
         default=None,
-        help="Severity head: huber|quantile (tkan/sigkan only). quantile emits "
+        help="Severity head: point|quantile (tkan/sigkan only; 'huber' is a "
+        "deprecated alias for point). quantile emits "
         "one column per level in the config's `severity_quantiles` and trains "
         "the regression term with a pinball loss. Default: config's "
-        "`severity_mode`, else huber.",
+        "`severity_mode`, else point.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Epoch count (default: config's `epochs`, else 20). Unlike --smoke "
+        "this changes ONLY the epoch count, leaving the window geometry as the "
+        "config sets it -- use it for short runs that must otherwise match a "
+        "validated configuration exactly.",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Request bitwise-reproducible kernels (deterministic algorithms, "
+        "cudnn.deterministic, benchmark off). Requires CUBLAS_WORKSPACE_CONFIG "
+        "to be exported before the process starts, or the run refuses to begin. "
+        "Default: config's `deterministic`, else off -- every validated run to "
+        "date was produced with it off.",
     )
     parser.add_argument("--smoke", action="store_true", help="Clamp epochs for a fast CI run.")
     args = parser.parse_args(argv)

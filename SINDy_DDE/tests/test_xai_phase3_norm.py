@@ -285,7 +285,7 @@ def test_load_model_quantile_checkpoint_falls_back_to_default_levels(tmp_path, c
 
 
 def test_load_model_point_checkpoint_keeps_default_severity_mode(tmp_path):
-    """A plain (point) checkpoint still builds the huber head, unchanged."""
+    """A plain (point) checkpoint still builds the point head, unchanged."""
     pytest.importorskip("torch")
     import torch
 
@@ -299,7 +299,7 @@ def test_load_model_point_checkpoint_keeps_default_severity_mode(tmp_path):
 
     pre = _make_preprocessing([0.0] * 4, [1.0] * 4, ["a", "b", "c", "d"])
     loaded = xai._load_model(str(ckpt), _model_args(), pre)
-    assert loaded.severity_mode == "huber"
+    assert loaded.severity_mode == "point"
     assert set(loaded({"window": torch.zeros(2, 32, 4),
                        "tau": torch.full((2,), 4, dtype=torch.long)})) == {
         "b_over_blim", "chatter_logit"

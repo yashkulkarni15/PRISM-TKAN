@@ -740,7 +740,7 @@ def _cli_args(**overrides):
         model=None, fold=None, device=None, num_workers=None, compile=None,
         smoke=False, lr_schedule=None, warmup_epochs=None, grad_clip=None,
         optimizer=None, weight_decay=None, side_input=None, side_hidden=None,
-        severity_mode=None,
+        severity_mode=None, deterministic=None, epochs=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -962,7 +962,7 @@ def test_build_train_config_yaml_side_input_dropped_for_mlp():
 # Quantile severity head (pinball loss) reachable from TrainConfig / the CLI.
 # The head + loss already exist (tests/test_severity_quantile.py); these tests
 # pin the config -> build_model -> preprocessing.json -> checkpoint-reload wiring.
-# Defaults ("huber") must keep the validated point-regression path untouched.
+# Defaults ("point") must keep the validated point-regression path untouched.
 # --------------------------------------------------------------------------- #
 def _severity_batch(B=4, L=64, C=4, seed=0):
     """A tiny batch matching ``_tiny_cfg``'s window geometry (64 x 4 channels)."""
@@ -980,7 +980,7 @@ def _severity_batch(B=4, L=64, C=4, seed=0):
 
 def test_train_config_severity_defaults():
     cfg = TrainConfig()
-    assert cfg.severity_mode == "huber"
+    assert cfg.severity_mode == "point"
     assert tuple(cfg.severity_quantiles) == (0.1, 0.5, 0.9)
 
 
@@ -1036,14 +1036,14 @@ def test_build_model_default_severity_is_point_estimate():
     # The validated default: a bare TrainConfig yields the point head, with no
     # quantile keys anywhere in the output dict.
     model = build_model(_tiny_cfg(model="tkan", hidden_size=8))
-    assert model.severity_mode == "huber"
+    assert model.severity_mode == "point"
     out = model(_severity_batch())
     assert set(out) == {"b_over_blim", "chatter_logit"}
     assert out["b_over_blim"].shape == (4,)
 
 
 def test_train_one_fold_default_uses_mse_loss_part(synth_inputs, tmp_path, monkeypatch):
-    # Regression guard: the default (huber) path must keep scoring every batch
+    # Regression guard: the default (point) path must keep scoring every batch
     # with the weighted-MSE severity term, exactly as the validated runs did.
     npz_root, table, folds = synth_inputs
     seen = _spy_loss_parts(monkeypatch)
@@ -1107,7 +1107,7 @@ def test_train_one_fold_quantile_records_severity_in_preprocessing(synth_inputs,
 
 
 def test_train_one_fold_default_severity_key_absent(synth_inputs, tmp_path):
-    # The default (huber) preprocessing.json schema must be unchanged: the key
+    # The default (point) preprocessing.json schema must be unchanged: the key
     # is ABSENT, exactly as the side block is when side_input is off.
     npz_root, table, folds = synth_inputs
     cfg = _tiny_cfg(model="tkan", epochs=2, hidden_size=8, smoke=True)
@@ -1122,7 +1122,7 @@ def test_train_one_fold_default_severity_key_absent(synth_inputs, tmp_path):
     import mlflow
 
     mlflow.set_tracking_uri(uri)
-    assert mlflow.get_run(summary["run_id"]).data.params["severity_mode"] == "huber"
+    assert mlflow.get_run(summary["run_id"]).data.params["severity_mode"] == "point"
 
 
 # -- CLI merge of the severity fields (scripts/train_phase3.py) ---------------- #
@@ -1138,34 +1138,34 @@ def test_build_train_config_severity_mode_from_yaml():
 
 def test_build_train_config_cli_overrides_yaml_severity_mode():
     mod = _load_train_script_module()
-    yaml_dict = {"severity_mode": "huber"}
+    yaml_dict = {"severity_mode": "point"}
     assert mod._build_train_config(
         yaml_dict, _cli_args(severity_mode="quantile")
     ).severity_mode == "quantile"
     # ...and the other direction (CLI wins over a quantile YAML too).
     assert mod._build_train_config(
         {"severity_mode": "quantile"}, _cli_args(severity_mode="huber")
-    ).severity_mode == "huber"
+    ).severity_mode == "point"
 
 
 def test_build_train_config_severity_defaults_when_unset():
     mod = _load_train_script_module()
     cfg = mod._build_train_config({}, _cli_args())
-    assert cfg.severity_mode == "huber"
+    assert cfg.severity_mode == "point"
     assert tuple(cfg.severity_quantiles) == (0.1, 0.5, 0.9)
 
 
-def test_shipped_config_keeps_validated_huber_severity():
+def test_shipped_config_keeps_validated_point_severity():
     # configs/phase3_tkan.yaml documents every knob. severity_mode must be
     # PRESENT (so the quantile run is a one-flag override) and set to the
-    # validated "huber" so in-flight sweeps are unaffected.
+    # validated point head so in-flight sweeps are unaffected.
     mod = _load_train_script_module()
     cfg_path = Path(__file__).resolve().parents[1] / "configs" / "phase3_tkan.yaml"
     from pri2m.config import load_config
 
     cfg_dict = load_config(str(cfg_path))
-    assert cfg_dict["severity_mode"] == "huber"
-    assert mod._build_train_config(cfg_dict, _cli_args()).severity_mode == "huber"
+    assert cfg_dict["severity_mode"] == "point"
+    assert mod._build_train_config(cfg_dict, _cli_args()).severity_mode == "point"
     # ...and a single --severity-mode override flips it without touching YAML.
     assert mod._build_train_config(
         cfg_dict, _cli_args(severity_mode="quantile")

@@ -34,7 +34,12 @@ from collections.abc import Sequence
 import torch
 import torch.nn as nn
 
-from pri2m.models.heads import SeverityHead, TrajectoryHead
+from pri2m.models.heads import (
+    DEFAULT_SEVERITY_MODE,
+    SeverityHead,
+    TrajectoryHead,
+    normalise_severity_mode,
+)
 from pri2m.models.tkan import TKANEncoder
 
 #: Default scalar process parameters fed to the side branch (Gao JMSE-2025).
@@ -136,7 +141,7 @@ class TKANModel(nn.Module):
         side_input: bool = False,
         side_features: Sequence[str] = DEFAULT_SIDE_FEATURES,
         side_hidden: int = 16,
-        severity_mode: str = "huber",
+        severity_mode: str = DEFAULT_SEVERITY_MODE,
         severity_quantiles: Sequence[float] = (0.1, 0.5, 0.9),
     ) -> None:
         super().__init__()
@@ -149,7 +154,10 @@ class TKANModel(nn.Module):
         self.side_input = bool(side_input)
         self.side_features = tuple(str(f) for f in side_features)
         self.side_hidden = int(side_hidden)
-        self.severity_mode = str(severity_mode)
+        # Normalise here as well as in SeverityHead: this attribute is read back
+        # by the trainer and the XAI loader, so it must be the canonical spelling
+        # even though the head would have normalised its own copy.
+        self.severity_mode = normalise_severity_mode(severity_mode)
         self.severity_quantiles = tuple(float(q) for q in severity_quantiles)
 
         self.encoder = TKANEncoder(

@@ -42,7 +42,13 @@ os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 from pri2m.config import load_config
 from pri2m.data.phase3_sequence import NormStats, WindowConfig, build_fold_loaders
 from pri2m.models.baseline import MLPBaseline
-from pri2m.models.heads import _VALID_SEVERITY_MODES, Phase3Model
+from pri2m.models.heads import (
+    DEFAULT_SEVERITY_MODE,
+    _SEVERITY_MODE_ALIASES,
+    _VALID_SEVERITY_MODES,
+    Phase3Model,
+    normalise_severity_mode,
+)
 from pri2m.models.tkan_model import DEFAULT_SIDE_FEATURES, TKANModel
 from pri2m.training.losses import LossWeights, total_loss
 from pri2m.training.metrics import per_file_severity_metrics, trajectory_gate_report
@@ -55,6 +61,8 @@ __all__ = [
     "schedule_factor",
     "side_feature_stats",
     "Phase3Trainer",
+    "check_deterministic_env",
+    "environment_block",
     "train_one_fold",
 ]
 
@@ -119,13 +127,31 @@ class TrainConfig:
     side_input: bool = False
     # Width of the side-branch MLP output (ignored unless side_input is True).
     side_hidden: int = 16
-    # Severity-head regression mode: {"huber","quantile"} (tkan/sigkan only).
-    # "huber" is the validated point head; "quantile" emits one column per level
+    # Severity-head regression mode: {"point","quantile"} (tkan/sigkan only).
+    # "point" is the validated point head (weighted MSE; "huber" is accepted as a
+    # deprecated alias); "quantile" emits one column per level
     # in ``severity_quantiles`` and routes the regression term through the
     # pinball loss (see pri2m.training.losses.severity_loss).
-    severity_mode: str = "huber"
-    # Quantile levels for severity_mode="quantile" (ignored in "huber" mode).
+    severity_mode: str = DEFAULT_SEVERITY_MODE
+    # Quantile levels for severity_mode="quantile" (ignored in "point" mode).
     severity_quantiles: tuple[float, ...] = (0.1, 0.5, 0.9)
+    # Request bitwise-reproducible kernels (see _seed_everything). OFF by
+    # default: every returned run -- the 5-fold sweep, both 2026-07 retrains,
+    # the held-out eval -- was produced without these flags, so enabling them by
+    # default would silently change the arithmetic of every future run against
+    # that history. Update 14 measured what the absence costs: a 0.0092 AUC
+    # repeatability floor, above both retrain effects.
+    deterministic: bool = False
+
+    def __post_init__(self) -> None:
+        # Map a deprecated severity-mode spelling forward, so a config built
+        # directly -- from a stored dict, a notebook, a test -- behaves like one
+        # built through the CLI, and so summary.json echoes one spelling. An
+        # UNKNOWN mode is deliberately left untouched for build_model to reject
+        # with its own message; normalising must not become a silent pass.
+        self.severity_mode = _SEVERITY_MODE_ALIASES.get(
+            self.severity_mode, self.severity_mode
+        )
 
     def effective_epochs(self) -> int:
         """Epoch count after the smoke clamp."""
@@ -151,13 +177,102 @@ class TrainConfig:
 # --------------------------------------------------------------------------- #
 # Determinism
 # --------------------------------------------------------------------------- #
-def _seed_everything(seed: int) -> None:
-    """Seed ``random`` / ``numpy`` / ``torch`` for reproducible runs."""
+# cuBLAS reads this when it creates its workspace; only these two values enable
+# deterministic GEMMs (:4096:8 costs ~24 MiB of workspace, :16:8 is the frugal
+# variant that serialises more).
+_LEGAL_CUBLAS_WORKSPACE = (":4096:8", ":16:8")
+
+
+def check_deterministic_env() -> None:
+    """Refuse a deterministic run whose cuBLAS workspace is unconfigured.
+
+    cuBLAS reads ``CUBLAS_WORKSPACE_CONFIG`` once, when it creates its handle,
+    so the trainer cannot set it for itself after training has started. Without
+    it, ``use_deterministic_algorithms(True)`` does not fail at setup -- it
+    raises from inside the first affected matmul, potentially hours in. This
+    converts that into an immediate error that names the fix.
+    """
+    value = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if value in _LEGAL_CUBLAS_WORKSPACE:
+        return
+    seen = "unset" if value is None else repr(value)
+    raise ValueError(
+        f"deterministic=True requires CUBLAS_WORKSPACE_CONFIG to be one of "
+        f"{' or '.join(_LEGAL_CUBLAS_WORKSPACE)} (got {seen}). cuBLAS reads it "
+        f"when it builds its workspace, so it must be exported before the "
+        f"process starts -- e.g. `export CUBLAS_WORKSPACE_CONFIG=:4096:8` in "
+        f"the sbatch wrapper. Setting it here would be too late to take effect."
+    )
+
+
+def _seed_everything(seed: int, deterministic: bool = False) -> None:
+    """Seed ``random`` / ``numpy`` / ``torch`` for reproducible runs.
+
+    Seeding fixes the *inputs*, not which kernels consume them. With
+    ``cudnn.benchmark`` left at its default the backend picks kernels by timing
+    them at runtime, so the arithmetic path tracks transient GPU state -- which
+    is the pattern Update 14 measured: mostly reproducible, intermittently not,
+    and uncorrelated with which node the job landed on.
+
+    ``deterministic=True`` closes that gap and is **opt-in**: the default path
+    deliberately calls none of these APIs, leaving every previously validated
+    run bit-comparable.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():  # pragma: no cover - CPU CI
         torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        check_deterministic_env()
+        # Strict, not warn_only: a kernel with no deterministic implementation
+        # should stop the run at setup, not yield a run that quietly is not
+        # deterministic and gets compared against one that is.
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def environment_block() -> dict:
+    """What the run actually executed on, for ``summary.json``.
+
+    Read back from torch and the environment rather than echoed from the config:
+    a config records what was *requested*, and the 2026-07 duplicate-pair
+    divergence was unanswerable from stored artifacts precisely because no
+    artifact recorded what was *in effect*. Written unconditionally, so an
+    absent block means "predates this code" and never "ran non-deterministically".
+    """
+    import platform
+    import socket
+
+    gpu_name, gpu_count = None, 0
+    if torch.cuda.is_available():  # pragma: no cover - CPU CI
+        gpu_count = torch.cuda.device_count()
+        gpu_name = torch.cuda.get_device_name(0)
+
+    try:
+        cudnn_version = torch.backends.cudnn.version()
+    except Exception:  # pragma: no cover - no cuDNN in a CPU-only build
+        cudnn_version = None
+
+    return {
+        "hostname": socket.gethostname(),
+        "python_version": platform.python_version(),
+        "torch_version": torch.__version__,
+        "numpy_version": np.__version__,
+        "cuda_version": torch.version.cuda,
+        "cudnn_version": cudnn_version,
+        "gpu_name": gpu_name,
+        "gpu_count": int(gpu_count),
+        # SLURM accounting is purged on a retention schedule; these two fields
+        # are what let a stored run be matched back to a node months later.
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+        "slurm_nodelist": os.environ.get("SLURM_NODELIST"),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "deterministic_algorithms": bool(torch.are_deterministic_algorithms_enabled()),
+        "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
+        "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -241,7 +356,7 @@ def build_model(cfg: TrainConfig) -> Phase3Model:
     the TKAN models only; requesting it for ``"mlp"`` raises ``ValueError`` so
     the MLP baseline comparison stays untouched.
 
-    ``cfg.severity_mode`` selects the severity head: ``"huber"`` (default) is
+    ``cfg.severity_mode`` selects the severity head: ``"point"`` (default) is
     the validated point regression, ``"quantile"`` emits one column per level in
     ``cfg.severity_quantiles`` and is trained with the pinball loss. Like
     ``side_input`` it is a TKAN-only feature -- requesting it for ``"mlp"``
@@ -416,7 +531,7 @@ class Phase3Trainer:
         "nonfinite_batches": [int, ...]}`` (one entry per epoch each; the
         ``nonfinite_batches`` key is always present so summaries stay uniform).
         """
-        _seed_everything(self.cfg.seed)
+        _seed_everything(self.cfg.seed, deterministic=getattr(self.cfg, "deterministic", False))
         epochs = self.cfg.effective_epochs()
         device = resolve_device(self.cfg.device)
         model.to(device)
@@ -852,7 +967,7 @@ def _build_preprocessing(
             "mean": [float(v) for v in mean],
             "std": [float(v) for v in std],
         }
-    if cfg.severity_mode != "huber":
+    if cfg.severity_mode != DEFAULT_SEVERITY_MODE:
         # A non-default severity head changes the head's OUTPUT WIDTH, so a
         # checkpoint cannot be rebuilt without knowing the mode and the exact
         # quantile levels (the levels are unrecoverable from the state_dict --
@@ -1039,6 +1154,10 @@ def train_one_fold(
             "model": cfg.model,
             "fold": cfg.fold,
             "config": _json_safe(cfg),
+            # Unconditional: the runs that most need diagnosing are the ordinary
+            # ones, and a gated block would be ambiguous between "not recorded"
+            # and "not deterministic".
+            "environment": environment_block(),
             "preprocessing": _json_safe(preprocessing),
             "val": _json_safe(val_metrics),
             "best_epoch": best_epoch,

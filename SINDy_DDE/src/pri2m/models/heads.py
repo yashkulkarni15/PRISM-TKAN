@@ -31,7 +31,34 @@ import torch.nn as nn
 from pri2m.models.kan import KANLinear
 
 
-_VALID_SEVERITY_MODES = ("huber", "quantile")
+# The point head is named for what it emits, matching its sibling "quantile".
+# It was called "huber" until 2026-08-11, which named a loss the code has never
+# contained: the point path calls weighted_mse and reports the part as
+# "sev_mse", and there is no Huber/smooth-L1 anywhere in pri2m.training.losses.
+DEFAULT_SEVERITY_MODE = "point"
+_VALID_SEVERITY_MODES = ("point", "quantile")
+# Deprecated spellings, still accepted: every config, sweep and summary.json
+# written before the rename says "huber", and rejecting them would strand the
+# validated runs for a cosmetic gain.
+_SEVERITY_MODE_ALIASES = {"huber": "point"}
+
+
+def normalise_severity_mode(mode: str) -> str:
+    """Canonical severity mode, mapping deprecated spellings forward.
+
+    Normalising at the boundary (rather than storing whatever the caller passed)
+    means exactly one spelling reaches the model, the loss router, the config
+    echo in ``summary.json`` and the ``preprocessing.json`` gate -- so none of
+    them has to know the alias exists.
+    """
+    canonical = _SEVERITY_MODE_ALIASES.get(str(mode), str(mode))
+    if canonical not in _VALID_SEVERITY_MODES:
+        raise ValueError(
+            f"unknown severity_mode {mode!r}; expected one of "
+            f"{_VALID_SEVERITY_MODES} (or the deprecated alias "
+            f"{tuple(_SEVERITY_MODE_ALIASES)})"
+        )
+    return canonical
 
 
 class SeverityHead(nn.Module):
@@ -46,13 +73,13 @@ class SeverityHead(nn.Module):
         applied to ``tanh(context)`` (so the B-spline path is active). If
         ``False``, plain ``nn.Linear`` heads are used.
     severity_mode:
-        ``"huber"`` (default) -- the current point-regression head: a single
+        ``"point"`` (default) -- the point-regression head: a single
         ``b_over_blim`` scalar per sample. ``"quantile"`` -- emit one column per
         level in ``quantiles`` (prediction intervals for the heavy-tailed
         severity target), routed through a pinball loss at train time.
     quantiles:
         Quantile levels for ``severity_mode="quantile"`` (each strictly in
-        ``(0, 1)``; ignored in ``"huber"`` mode). The point estimate
+        ``(0, 1)``; ignored in ``"point"`` mode). The point estimate
         ``b_over_blim`` is the column nearest the median (0.5).
 
     Returns (from :meth:`forward`)
@@ -69,17 +96,15 @@ class SeverityHead(nn.Module):
         self,
         hidden_size: int,
         use_kan: bool = True,
-        severity_mode: str = "huber",
+        severity_mode: str = DEFAULT_SEVERITY_MODE,
         quantiles=(0.1, 0.5, 0.9),
     ) -> None:
         super().__init__()
         self.hidden_size = int(hidden_size)
         self.use_kan = bool(use_kan)
-        if severity_mode not in _VALID_SEVERITY_MODES:
-            raise ValueError(
-                f"severity_mode must be one of {_VALID_SEVERITY_MODES}; "
-                f"got {severity_mode!r}"
-            )
+        # Normalise at the boundary so only the canonical spelling is ever
+        # stored, compared against, or written into an artifact.
+        severity_mode = normalise_severity_mode(severity_mode)
         self.severity_mode = severity_mode
         if severity_mode == "quantile":
             q = tuple(float(x) for x in quantiles)

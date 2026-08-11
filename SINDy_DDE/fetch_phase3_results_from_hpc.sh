@@ -9,7 +9,9 @@
 
 set -euo pipefail
 
-REMOTE=yashkulk@greatlakes.arc-ts.umich.edu
+# Pin a login node when the round-robin lands on a loaded one (it authenticates
+# and then refuses the session):  REMOTE=yashkulk@gl-login2.arc-ts.umich.edu $0
+REMOTE="${REMOTE:-yashkulk@greatlakes.arc-ts.umich.edu}"
 DEST=/nfs/turbo/coe-jaabell/PRI2M           # live GL project root
 CTRL="$HOME/.ssh/cm-pri2m-fetch.sock"
 
@@ -65,7 +67,7 @@ echo; echo ">>> [4/4] U13 results (regenerative + counterfactuals)"
 # the randomization-sanity number and several update figures. They were absent
 # from this list until 2026-07-30, when a local `rm -rf SINDy_DDE` during a
 # branch rebuild deleted them and nothing here could bring them back.
-for sub in regenerative counterfactuals activation_modes \
+for sub in regenerative counterfactuals activation_modes comb \
            fold0 fold1 fold2_w512 fold3 fold4 conformal concept_probes; do
   if ssh -o ControlPath="$CTRL" "$REMOTE" "test -d '$DEST/results/phase3/xai/$sub'"; then
     rs "$REMOTE:$DEST/results/phase3/xai/$sub/" "results/phase3/xai/$sub/"
@@ -96,6 +98,18 @@ for p in sorted(glob.glob("results/phase3/xai/regenerative/*/regenerative.json")
     s = d.get("summary", d)
     print(f"  regenerative {p.split('/')[-2]:12s} "
           f"{time.strftime('%m-%d %H:%M', time.localtime(os.path.getmtime(p)))}")
+print("\nComb probe (predicted vs measured, per fold):")
+for p in sorted(glob.glob("results/phase3/xai/comb/comb_probe_*.json")):
+    d = json.load(open(p))
+    s = d.get("summary", {})
+    tr = (s.get("trained_peak_alignment") or {}).get("frac_within_0_1")
+    un = (s.get("untrained_peak_alignment") or {}).get("frac_within_0_1")
+    cr = s.get("median_corr_predicted_measured")
+    # chance is 0.20: the +/-0.1 bands around 0,1,2,3 cover 20% of a 0-3 axis.
+    print(f"  {p.split('/')[-1]:32s} trained {tr}  untrained {un}  corr(pred,meas) {cr}")
+if not glob.glob("results/phase3/xai/comb/comb_probe_*.json"):
+    print("  (no comb probe manifests fetched)")
+
 print("\nU14-B activation modes:")
 for p in sorted(glob.glob("results/phase3/xai/activation_modes/*/activation_modes_manifest.json")):
     d = json.load(open(p))

@@ -9,7 +9,9 @@
 
 set -euo pipefail
 
-REMOTE=yashkulk@greatlakes.arc-ts.umich.edu
+# Pin a login node when the round-robin lands on a loaded one:
+#   REMOTE=yashkulk@gl-login2.arc-ts.umich.edu $0
+REMOTE="${REMOTE:-yashkulk@greatlakes.arc-ts.umich.edu}"
 DEST=/nfs/turbo/coe-jaabell/PRI2M           # live GL project root (NOT .../PRI2M/SINDy_DDE)
 CTRL="$HOME/.ssh/cm-pri2m.sock"
 

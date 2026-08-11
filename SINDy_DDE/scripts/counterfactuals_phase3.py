@@ -249,6 +249,81 @@ def pool_dice(blocks: list[dict]) -> dict | None:
     }
 
 
+AXIS_NOTE = (
+    "axis_breakdown/n_same_axis describe WHICH knob each generator turned. "
+    "physics_constrained_counterfactual searches b in (b_floor, b_base], so "
+    "it can only hold or lower depth; DiCE varies both axes freely. Use "
+    "outcome_agreement_rate to compare the methods."
+)
+
+
+def axis_of(omega_base, b_base, omega_cf, b_cf) -> str:
+    """Which lever did this generator pull?"""
+    moved_w = not np.isclose(omega_cf, omega_base, rtol=1e-6, atol=1e-9)
+    moved_b = not np.isclose(b_cf, b_base, rtol=1e-6, atol=1e-9)
+    if moved_w and moved_b:
+        return "both"
+    if moved_w:
+        return "omega"
+    if moved_b:
+        return "b_mm"
+    return "none"
+
+
+def compare_generator_outcomes(pairs: list[dict]) -> dict:
+    """Compare the two counterfactual generators on WHERE THEY LAND.
+
+    Deliberately pure and free of both the network and ``blim_fn``: every input
+    it needs is a coordinate or a stability flag that the caller has already
+    resolved. That is what lets a stored manifest be repaired offline with the
+    identical code the live runner uses -- see
+    ``scripts/repair_counterfactual_manifest.py``.
+
+    Each pair carries the DiCE move (``dice_omega_cf``/``dice_b_cf``/
+    ``dice_stable``) and, when the physics search also produced one, its move
+    under ``physics_*``. A pair without a physics move still counts toward the
+    DiCE axis tally but is not comparable, mirroring the original loop.
+    """
+    empty = {"omega": 0, "b_mm": 0, "both": 0, "none": 0}
+    axes = {"dice": dict(empty), "physics": dict(empty)}
+    per_case, n_same_axis, n_both_stable, n_agrees, n_comparable = [], 0, 0, 0, 0
+
+    for pair in pairs:
+        omega_base, b_base = pair["omega_base"], pair["b_base"]
+        d_axis = axis_of(omega_base, b_base, pair["dice_omega_cf"], pair["dice_b_cf"])
+        axes["dice"][d_axis] += 1
+        rec = {"dice_axis": d_axis}
+
+        if pair.get("physics_omega_cf") is not None and pair.get("physics_b_cf") is not None:
+            p_axis = axis_of(omega_base, b_base,
+                             pair["physics_omega_cf"], pair["physics_b_cf"])
+            axes["physics"][p_axis] += 1
+            stable, p_stable = bool(pair["dice_stable"]), bool(pair["physics_stable"])
+            same_axis, agrees = d_axis == p_axis, stable == p_stable
+            rec.update({"physics_axis": p_axis, "physics_stable": p_stable,
+                        "same_axis": same_axis, "outcome_agrees": agrees})
+            n_comparable += 1
+            n_same_axis += int(same_axis)
+            n_both_stable += int(stable and p_stable)
+            n_agrees += int(agrees)
+        per_case.append(rec)
+
+    return {
+        # Agreement on the OUTCOME (both land stable, or neither does).
+        "n_comparable": n_comparable,
+        "n_both_stable": n_both_stable,
+        "n_outcome_agrees": n_agrees,
+        "outcome_agreement_rate": (n_agrees / n_comparable) if n_comparable else None,
+        # Which lever each generator pulled. NOT an agreement measure: the
+        # physics search cannot raise depth by construction, so a differing axis
+        # is a difference in strategy, not a contradiction.
+        "axis_breakdown": axes,
+        "n_same_axis": n_same_axis,
+        "axis_note": AXIS_NOTE,
+        "per_case": per_case,
+    }
+
+
 def run_dice(estimator, surro_info, cf_results, blim_fn, *,
              flip_threshold: float, seed: int, total_cfs: int) -> dict:
     """U13-B: DiCE on the SAME operating points, validated the same way.
@@ -265,22 +340,8 @@ def run_dice(estimator, surro_info, cf_results, blim_fn, *,
             "n_cases": len(cf_results), "n_found": 0,
         }
 
-    def _axis(omega_base, b_base, omega_cf, b_cf) -> str:
-        """Which lever did this generator pull?"""
-        moved_w = not np.isclose(omega_cf, omega_base, rtol=1e-6, atol=1e-9)
-        moved_b = not np.isclose(b_cf, b_base, rtol=1e-6, atol=1e-9)
-        if moved_w and moved_b:
-            return "both"
-        if moved_w:
-            return "omega"
-        if moved_b:
-            return "b_mm"
-        return "none"
-
-    _EMPTY = {"omega": 0, "b_mm": 0, "both": 0, "none": 0}
-    axes = {"dice": dict(_EMPTY), "physics": dict(_EMPTY)}
     per_case, n_found, n_stable = [], 0, 0
-    n_same_axis = n_both_stable = n_outcome_agrees = n_comparable = 0
+    pairs, pair_rows = [], []
     for res in cf_results:
         # Column ORDER matters: the estimator was fitted on ["omega", "b_mm"]
         # positionally, and DiCE hands it a frame built from these keys.
@@ -303,30 +364,30 @@ def run_dice(estimator, surro_info, cf_results, blim_fn, *,
             omega_d = float(cf_df["omega"].iloc[0])
             b_d = float(cf_df["b_mm"].iloc[0])
             stable = bool(b_d < float(blim_fn(omega_d)))
-            d_axis = _axis(res["omega_base"], res["b_base"], omega_d, b_d)
-            axes["dice"][d_axis] += 1
             rec.update({"omega_cf": omega_d, "b_cf": b_d,
-                        "physically_stable": stable, "dice_axis": d_axis})
+                        "physically_stable": stable})
             n_stable += int(stable)
 
             # Compare the two generators on WHERE THEY LAND, not on which lever
             # they pulled: the physics search's b_range caps b at b_base, so it
             # structurally cannot raise depth while DiCE varies both axes. Both
-            # ending stable -- or both failing to -- is the real agreement.
+            # ending stable -- or both failing to -- is the real agreement. The
+            # comparison itself lives in compare_generator_outcomes so the
+            # offline manifest repair runs the identical code.
+            pair = {"omega_base": res["omega_base"], "b_base": res["b_base"],
+                    "dice_omega_cf": omega_d, "dice_b_cf": b_d,
+                    "dice_stable": stable}
             if res.get("omega_cf") is not None and res.get("b_cf") is not None:
                 p_omega, p_b = float(res["omega_cf"]), float(res["b_cf"])
-                p_axis = _axis(res["omega_base"], res["b_base"], p_omega, p_b)
-                axes["physics"][p_axis] += 1
-                p_stable = bool(p_b < float(blim_fn(p_omega)))
-                same_axis = d_axis == p_axis
-                agrees = stable == p_stable
-                rec.update({"physics_axis": p_axis, "physics_stable": p_stable,
-                            "same_axis": same_axis, "outcome_agrees": agrees})
-                n_comparable += 1
-                n_same_axis += int(same_axis)
-                n_both_stable += int(stable and p_stable)
-                n_outcome_agrees += int(agrees)
+                pair.update({"physics_omega_cf": p_omega, "physics_b_cf": p_b,
+                             "physics_stable": bool(p_b < float(blim_fn(p_omega)))})
+            pairs.append(pair)
+            pair_rows.append(rec)
         per_case.append(rec)
+
+    comparison = compare_generator_outcomes(pairs)
+    for rec, annotation in zip(pair_rows, comparison["per_case"]):
+        rec.update(annotation)
 
     return {
         "backend": "dice_ml",
@@ -336,22 +397,7 @@ def run_dice(estimator, surro_info, cf_results, blim_fn, *,
         "n_physically_stable": n_stable,
         "found_rate": (n_found / len(cf_results)) if cf_results else None,
         "physically_stable_rate": (n_stable / n_found) if n_found else None,
-        # Agreement on the OUTCOME (both land stable, or neither does).
-        "n_comparable": n_comparable,
-        "n_both_stable": n_both_stable,
-        "n_outcome_agrees": n_outcome_agrees,
-        "outcome_agreement_rate": (n_outcome_agrees / n_comparable) if n_comparable else None,
-        # Which lever each generator pulled. NOT an agreement measure: the
-        # physics search cannot raise depth by construction, so a differing axis
-        # is a difference in strategy, not a contradiction.
-        "axis_breakdown": axes,
-        "n_same_axis": n_same_axis,
-        "axis_note": (
-            "axis_breakdown/n_same_axis describe WHICH knob each generator turned. "
-            "physics_constrained_counterfactual searches b in (b_floor, b_base], so "
-            "it can only hold or lower depth; DiCE varies both axes freely. Use "
-            "outcome_agreement_rate to compare the methods."
-        ),
+        **{k: v for k, v in comparison.items() if k != "per_case"},
         "total_CFs": int(total_cfs),
         "seed": int(seed),
         "per_case": per_case,

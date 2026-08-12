@@ -408,8 +408,27 @@ pairs cannot be separated by the number, so submission order is recorded there *
 not dressed up as a measurement**. Runs belonging to no published sweep are marked too, so
 "unmarked" never means "unclassified".
 
-**H. [SUBMITTED — jobs 56977333 and 56977341 on `gpu_mig40`, `--time=04:00:00`, awaiting return]
-The determinism repeat.** **Queue-routing finding, worth keeping (2026-08-11):** the first pair (56886459 /
+**H. [RETURNED 2026-08-11 — BIT-IDENTICAL. The determinism flags fix run-to-run reproducibility.]**
+Jobs 56977333 / 56977341, `gpu_mig40`, both on **gl1250**, both `A100 80GB MIG 3g.40gb`, 5 epochs,
+fold 0, seed 0. Verified before reading: `environment` block present on both, with
+`deterministic_algorithms: true` / `cudnn_deterministic: true` / `cudnn_benchmark: false` /
+`cublas_workspace_config: :4096:8` **read back from torch**, and `epochs: 5` confirming `--epochs`
+reached the trainer. **Result: `same config: True`, `same history: True`** — train loss AND val AUC
+agree at full float precision on all five epochs (per-epoch |gap| = 0.00e+00; AUC 0.861881 /
+0.891918 / 0.912506 / 0.927372 / 0.939427). `compile: true` throughout, so compilation does not
+break determinism here. **THREE LIMITS, none of which the result survives without:** (1) **both runs
+landed on the SAME node.** July's divergence included different-node pairs, and 3 of 9 different-node
+pairs reproduced bit-exactly anyway, so node identity never predicted reproduction — this test did
+not exercise the cross-node case at all, and "deterministic across nodes" is NOT established. (2) It
+does **not** retroactively change the **0.0092 floor**, which was measured on runs that had these
+flags off; that floor still governs every comparison among the existing results. (3) One fold, five
+epochs, on an A100 MIG slice, while every other number in this project came from A40s.
+**What it does buy:** future comparisons run with `--deterministic` have no same-seed run-to-run
+component, so a measured difference is attributable to the change rather than to noise. That makes
+the U15 noise-floor arm materially cheaper — it reduces to **seed spread only** rather than seed
+spread plus same-config drift. **Cheap next step:** one more deterministic run targeted at a
+different node would close limit (1).
+The original submission notes follow. **Queue-routing finding, worth keeping (2026-08-11):** the first pair (56886459 /
 56886484, `spgpu`) sat a full day at `AssocGrpGRES`, which is **not** a shortage of A40s — it is a
 cap on how many GPUs the `jaabell0` account may hold at once, and another user on the account was
 holding all of them with ~27 array tasks behind them. `sacctmgr show assoc` displays it as blank

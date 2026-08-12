@@ -35,7 +35,7 @@ This cycle asks what the delayed input is actually used for, and answers it with
 - **Training does not build the filter. It chooses which way the filter points.** Randomly initialised networks already form the same comb, but with the sign decided by a coin flip. Trained networks reinforce the tooth-passing family in 110 of 125 measured cases; untrained ones land at 64 of 125, which is chance.
 - **The prediction was confirmed by direct measurement** on all five networks, agreeing to a correlation of 0.993 or better.
 - **Three naming and logic defects were fixed** before they could reach a written methods section.
-- **Next:** the reproducibility test is queued behind a shared cluster limit, and the noise floor it feeds is the gate on every remaining comparison.
+- **Reproducibility:** two runs of the same configuration with reproducible arithmetic requested came back identical to the last digit. The settings work, on one machine.
 
 ## 2. What the delayed input is used for
 
@@ -109,7 +109,7 @@ Three defects, each of which would have put a false or unsupported statement int
 
 ## 6. What is next
 
-- **Read the reproducibility test.** Two runs of one configuration, submitted, waiting behind a shared limit on how many GPUs the group account may hold at once. Nothing here depends on them.
+- **The reproducibility test returned, and it passed.** Two runs of one configuration, same fold and same seed, with reproducible arithmetic requested: the two training histories are identical to the last digit at every epoch. The settings work. Three limits keep this from being a general claim. Both runs landed on the same machine, so reproducibility across machines is untested. It does not change the 0.0092 figure, which was measured on runs made before these settings existed. And it is one fold on one graphics card of a type nothing else in this project used. What it buys is that future comparisons can be made with the settings on, so a measured difference is attributable to the change rather than to noise.
 - **Measure a proper noise floor.** The 0.0092 figure from Update 14 is the largest gap between two runs of one configuration, with no repeated baseline. Until it is a real distribution, no third-decimal comparison in this project is safe to claim.
 - **Remove edges and measure the damage.** The filter reading is descriptive. Deleting the pairs that carry it and measuring what held-out accuracy does would make it causal.
 

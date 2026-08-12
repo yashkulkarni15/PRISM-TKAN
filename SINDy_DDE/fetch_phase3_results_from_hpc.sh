@@ -44,6 +44,7 @@ rs "$REMOTE:$DEST/results/phase3/xai/fuzz/" results/phase3/xai/fuzz/
 echo; echo ">>> [2/3] summary.json / preprocessing.json (no checkpoints)"
 ssh -o ControlPath="$CTRL" "$REMOTE" \
   "cd '$DEST' && find results/phase3/runs results/phase3/runs_quantile \
+     results/phase3/runs_determinism \
      -maxdepth 2 \( -name summary.json -o -name preprocessing.json \) \
      -print0 2>/dev/null | tar cf - --null -T -" \
   | tar xf - -C .
@@ -98,6 +99,32 @@ for p in sorted(glob.glob("results/phase3/xai/regenerative/*/regenerative.json")
     s = d.get("summary", d)
     print(f"  regenerative {p.split('/')[-2]:12s} "
           f"{time.strftime('%m-%d %H:%M', time.localtime(os.path.getmtime(p)))}")
+# The determinism repeat: two runs of the SAME fold and seed with reproducible
+# kernels requested. Identical histories mean the flags fixed it.
+det = sorted(glob.glob("results/phase3/runs_determinism/*/summary.json"))
+print(f"\nDeterminism repeat: {len(det)} run(s) fetched")
+for p in det:
+    d = json.load(open(p)); e = d.get("environment") or {}
+    print(f"  {p.split('/')[-2][:10]} fold {d.get('fold')} epochs {len(d.get('history',{}).get('val',[]))}"
+          f"  node={e.get('slurm_nodelist')} gpu={e.get('gpu_name')}"
+          f"  det={e.get('deterministic_algorithms')} bench={e.get('cudnn_benchmark')}")
+    if not e:
+        print("    *** no environment block: this run predates the determinism code ***")
+if len(det) == 2:
+    a, b = [json.load(open(p)) for p in det]
+    same_cfg = a.get("config") == b.get("config")
+    identical = a.get("history") == b.get("history")
+    print(f"  same config: {same_cfg}")
+    print(f"  VERDICT: {'BIT-IDENTICAL' if identical else 'DIVERGED'}")
+    if not identical:
+        va = [x.get("auc") for x in a.get("history", {}).get("val", [])]
+        vb = [x.get("auc") for x in b.get("history", {}).get("val", [])]
+        gaps = [abs(x - y) for x, y in zip(va, vb) if x is not None and y is not None]
+        if gaps:
+            print(f"    largest per-epoch AUC gap: {max(gaps):.4f}")
+elif det:
+    print("  (need both runs before the comparison means anything)")
+
 print("\nComb probe (predicted vs measured, per fold):")
 for p in sorted(glob.glob("results/phase3/xai/comb/comb_probe_*.json")):
     d = json.load(open(p))

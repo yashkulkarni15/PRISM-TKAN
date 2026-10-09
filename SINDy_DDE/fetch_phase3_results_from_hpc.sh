@@ -44,7 +44,7 @@ rs "$REMOTE:$DEST/results/phase3/xai/fuzz/" results/phase3/xai/fuzz/
 echo; echo ">>> [2/3] summary.json / preprocessing.json (no checkpoints)"
 ssh -o ControlPath="$CTRL" "$REMOTE" \
   "cd '$DEST' && find results/phase3/runs results/phase3/runs_quantile \
-     results/phase3/runs_determinism \
+     results/phase3/runs_determinism results/phase3/runs_seeds \
      -maxdepth 2 \( -name summary.json -o -name preprocessing.json \) \
      -print0 2>/dev/null | tar cf - --null -T -" \
   | tar xf - -C .
@@ -69,6 +69,8 @@ echo; echo ">>> [4/4] U13 results (regenerative + counterfactuals)"
 # from this list until 2026-07-30, when a local `rm -rf SINDy_DDE` during a
 # branch rebuild deleted them and nothing here could bring them back.
 for sub in regenerative counterfactuals activation_modes comb \
+           heldout_pruning symbolic_substitution mode_ablation comb_ablation \
+           recurrence tkan_delay_heldout noise_compare equations \
            fold0 fold1 fold2_w512 fold3 fold4 conformal concept_probes; do
   if ssh -o ControlPath="$CTRL" "$REMOTE" "test -d '$DEST/results/phase3/xai/$sub'"; then
     rs "$REMOTE:$DEST/results/phase3/xai/$sub/" "results/phase3/xai/$sub/"
@@ -76,6 +78,14 @@ for sub in regenerative counterfactuals activation_modes comb \
     echo "    ($sub not on GL yet)"
   fi
 done
+
+# Exp 3 (2026-10-05): MiniROCKET manifests live outside xai/.
+echo; echo ">>> MiniROCKET comparator (Exp 3)"
+if ssh -o ControlPath="$CTRL" "$REMOTE" "test -d '$DEST/results/phase3/minirocket'"; then
+  rs "$REMOTE:$DEST/results/phase3/minirocket/" results/phase3/minirocket/
+else
+  echo "    (minirocket not on GL yet)"
+fi
 
 # --------------------------------------------------------------------------- #
 # Verification. The whole point of the fuzz refetch is the "contrasts" key;
@@ -162,6 +172,137 @@ for p in sorted(glob.glob("results/phase3/xai/counterfactuals/*manifest.json")):
     print(f"  counterfactuals agreement={pooled.get('agreement_rate')}")
     print(f"    survival={'ABSENT' if not surv else surv.get('frac_above_0_85')}"
           f"  dice={'ABSENT' if not dice else dice.get('error') or dice.get('found_rate')}")
+
+# Both of these runners write a partial manifest after EVERY arm, with
+# "complete": false, so the file existing proves nothing -- a wall-killed run
+# leaves a readable curve that looks exactly like a finished one.
+print("\nHeld-out pruning (ranked vs size-matched random control):")
+for p in sorted(glob.glob("results/phase3/xai/heldout_pruning/*/heldout_pruning.json")):
+    d = json.load(open(p)); prov = d.get("provenance", {})
+    base = d.get("baseline_auc")
+    print(f"  {p.split('/')[-2]:10s} complete={prov.get('complete')}  "
+          f"baseline={'None' if base is None else format(base, '.4f')}  "
+          f"edges={prov.get('n_edges_total')}  tol={prov.get('tol')}  "
+          f"smallest_faithful_fraction={d.get('smallest_faithful_fraction')}")
+    if not prov.get("complete"):
+        print("    *** PARTIAL -- written after every fraction; NOT a finished run ***")
+    for r in d.get("rows", []):
+        rk, rd = r.get("ranked_auc"), r.get("random_auc")
+        f = lambda v: "None" if v is None else format(v, ".4f")
+        gap = "" if (rk is None or rd is None) else f"  ranked-random={rk - rd:+.4f}"
+        print(f"    keep {r.get('fraction'):<6} n_zeroed={str(r.get('n_zeroed')):>6}  "
+              f"ranked={f(rk)}  random={f(rd)}{gap}"
+              + (f"  [{r.get('error') or r.get('note')}]"
+                 if r.get("error") or r.get("note") else ""))
+if not glob.glob("results/phase3/xai/heldout_pruning/*/heldout_pruning.json"):
+    print("  (nothing fetched)")
+
+print("\nSymbolic substitution (fitted closed forms swapped in at forward time):")
+for p in sorted(glob.glob("results/phase3/xai/symbolic_substitution/*/symbolic_substitution.json")):
+    d = json.load(open(p)); prov = d.get("provenance", {})
+    base = d.get("baseline_auc")
+    print(f"  {p.split('/')[-2]:10s} complete={prov.get('complete')}  "
+          f"baseline={'None' if base is None else format(base, '.4f')}  "
+          f"k_sweep={prov.get('k_sweep')}  rejected_fits={prov.get('n_rejected_fits')}  "
+          f"tol={prov.get('tol')}")
+    if not prov.get("complete"):
+        print("    *** PARTIAL -- written after every arm; NOT a finished run ***")
+    for r in d.get("rows", []):
+        c, q = r.get("correct_auc"), r.get("permuted_auc")
+        f = lambda v: "None" if v is None else format(v, ".4f")
+        v = r.get("verdict") or {}
+        tag = f"k={r.get('k')}" + (" CLAMPED" if r.get("clamped") else "")
+        print(f"    {tag:<12} n={str(r.get('n_substituted')):>3}  correct={f(c)}  "
+              f"permuted={f(q)}  "
+              + (f"[{r.get('error')}]" if r.get("error")
+                 else f"PASSED={v.get('passed')} "
+                      f"abs_gap={v.get('abs_gap')} control_gap={v.get('control_gap')}"))
+if not glob.glob("results/phase3/xai/symbolic_substitution/*/symbolic_substitution.json"):
+    print("  (nothing fetched)")
+
+# Unlike the two above, this one writes its manifest ONCE at the end, so the
+# file existing does mean the sweep finished -- but check the flag anyway.
+print("\nU14-B step 8 mode ablation (a mode must beat BOTH controls by > floor):")
+for p in sorted(glob.glob("results/phase3/xai/mode_ablation/mode_ablation_*.json")):
+    d = json.load(open(p))
+    prov, base = d.get("provenance", {}), d.get("baseline_auc")
+    print(f"  {p.split('/')[-1]:28s} complete={d.get('complete')}  "
+          f"baseline={'None' if base is None else format(base, '.4f')}  "
+          f"k={prov.get('k')}  floor={prov.get('floor')}")
+    for m in d.get("modes", []):
+        v = m.get("verdict") or {}
+        print(f"    {m.get('stratum'):<22} mode {m.get('mode')}  n={m.get('n_edges'):<4} "
+              f"drop={v.get('mode_drop')}  random={v.get('random_matched_drop')}  "
+              f"other={v.get('other_modes_drop')}  CLAIMABLE={v.get('claimable')}")
+    # Exp 1b arms, present only in --pairs runs.
+    for q in d.get("pairs", []) + d.get("all_gated", []):
+        v = q.get("verdict") or {}
+        drop = v.get("pair_drop", v.get("all_drop"))
+        print(f"    PAIR/ALL modes {q.get('modes')}  n={q.get('n_edges'):<4} drop={drop}  "
+              f"random={v.get('random_matched_drop')}  interaction={v.get('interaction')} "
+              f"({v.get('interaction_class')})  CLAIMABLE={v.get('claimable')}")
+    rc = d.get("reference_check")
+    if rc is not None:
+        print(f"    reference_check modes_identical={rc.get('modes_identical')}  "
+              "(False/None means the clustering did NOT reproduce Exp 1 -- read before using)")
+if not glob.glob("results/phase3/xai/mode_ablation/mode_ablation_*.json"):
+    print("  (nothing fetched)")
+
+print("\nExp 2 recurrence (compared by FUNCTION; None = UNDECIDED, not a fail):")
+for p in sorted(glob.glob("results/phase3/xai/recurrence/recurrence_*.json")):
+    d = json.load(open(p))
+    print(f"  {p.split('/')[-1]}  complete={d.get('complete')}  "
+          f"exclude={d.get('provenance', {}).get('exclude_mode')}")
+    for name, n in (d.get("networks") or {}).items():
+        print(f"    {name:6s} seed={n.get('train_seed')} claimable={n.get('claimable_modes')} "
+              f"excluded={n.get('excluded_modes')} n_cluster={n.get('n_cluster_edges')}")
+    for fold, s in (d.get("per_fold") or {}).items():
+        print(f"    fold {fold}: {s.get('summary')}")
+if not glob.glob("results/phase3/xai/recurrence/recurrence_*.json"):
+    print("  (nothing fetched)")
+
+print("\nExp 3 MiniROCKET (file-level AUC; drops must exceed the floor):")
+for p in sorted(glob.glob("results/phase3/minirocket/minirocket_*.json")):
+    d = json.load(open(p))
+    print(f"  {p.split('/')[-1]}  complete={d.get('complete')}  "
+          f"weighted={d.get('provenance', {}).get('sample_weighted')}")
+    print(f"    {json.dumps({k: v for k, v in d.items() if k not in ('provenance',)}, default=str)[:600]}")
+if not glob.glob("results/phase3/minirocket/minirocket_*.json"):
+    print("  (nothing fetched)")
+
+print("\nExp 3 matched TKAN delay test (held-out 121-125):")
+for p in sorted(glob.glob("results/phase3/xai/tkan_delay_heldout/tkan_delay_heldout_*.json")):
+    d = json.load(open(p))
+    print(f"  {p.split('/')[-1]}  complete={d.get('complete')}  baseline={d.get('baseline_auc')}")
+    print(f"    {json.dumps({k: v for k, v in d.items() if k not in ('provenance',)}, default=str)[:400]}")
+if not glob.glob("results/phase3/xai/tkan_delay_heldout/tkan_delay_heldout_*.json"):
+    print("  (nothing fetched)")
+
+print("\nComb ablation (deleting the comb-carrying delay pairs):")
+for p in sorted(glob.glob("results/phase3/xai/comb_ablation/comb_ablation_*.json")):
+    d = json.load(open(p)); prov = d.get("provenance", {}); v = d.get("verdict") or {}
+    print(f"  {p.split('/')[-1]:34s} complete={prov.get('complete')}  "
+          f"gate={prov.get('corr_threshold')}  comb_edges={prov.get('n_comb_edges')}  "
+          f"below_gate={prov.get('n_below_gate_edges')}")
+    if not prov.get("complete"):
+        print("    *** PARTIAL or abandoned -- NOT a finished run ***")
+        if prov.get("abandoned"):
+            print(f"    abandoned: {prov['abandoned']}")
+    for name, why in (prov.get("control_errors") or {}).items():
+        # An absent control is why claimable comes back None. It is not a pass.
+        print(f"    CONTROL ABSENT {name}: {why}")
+    for name, a in (d.get("arms") or {}).items():
+        auc = a.get("auc")
+        print(f"    {name:<26} n={a.get('n_edges'):>4} "
+              f"imp={a.get('summed_importance'):8.2f} "
+              f"auc={'None' if auc is None else format(auc, '.4f')}"
+              + (f"  [{a['error']}]" if a.get("error") else ""))
+    print(f"    drop={v.get('mode_drop')}  vs random={v.get('random_matched_drop')}  "
+          f"vs nonproportional={v.get('other_modes_drop')}  "
+          f"CLAIMABLE={v.get('claimable')}"
+          + ("  (None = UNDECIDED, NOT a pass)" if v.get("claimable") is None else ""))
+if not glob.glob("results/phase3/xai/comb_ablation/comb_ablation_*.json"):
+    print("  (nothing fetched)")
 
 print("\nrun summaries:")
 for p in sorted(glob.glob("results/phase3/runs*/*/summary.json"), key=os.path.getmtime):

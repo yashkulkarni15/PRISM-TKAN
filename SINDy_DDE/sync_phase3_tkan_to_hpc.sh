@@ -51,6 +51,12 @@ SRC_DIRS=(
 PKG_FILES=(src/pri2m/__init__.py src/pri2m/config.py)
 
 SCRIPT_FILES=(
+  scripts/calibrate_mirror_noise.py scripts/score_files_phase3.py   # T1/T2 noise comparison
+  # 2026-10-05 paper close-out: Exp 2 recurrence, Exp 3 MiniROCKET + TKAN delay arms
+  scripts/recurrence_phase3.py scripts/minirocket_phase3.py scripts/tkan_delay_heldout_phase3.py
+  # 2026-10-07 equations across seeds (src/pri2m/xai/equation*.py ride with the xai/ mirror)
+  scripts/equation_windows_phase3.py scripts/equation_dump_phase3.py scripts/eval_path_check_phase3.py
+  scripts/equations_phase3.py
   # core training / eval
   scripts/train_phase3.py scripts/xai_phase3.py
   scripts/build_phase3_dataset.py            # builds dataset.csv + folds.json
@@ -76,6 +82,9 @@ SCRIPT_FILES=(
   scripts/comb_phase3.py                     # tooth-pass comb reading (no net needed)
   scripts/comb_probe_phase3.py               # swept comb confirmation (CPU-only)
   scripts/mode_ablation_phase3.py            # U14-B step 8: causal mode ablation
+  scripts/heldout_pruning_phase3.py          # spec item B: held-out pruning curve + random control
+  scripts/symbolic_substitution_phase3.py    # spec item A: fitted closed forms substituted in
+  scripts/comb_ablation_phase3.py            # U15 s6: causal test of the comb reading
   scripts/stability_lobe_phase3.py           # model-implied stability lobe diagram
   scripts/counterfactuals_phase3.py          # physics-constrained counterfactuals
   scripts/concept_probes_phase3.py           # TCAV-style hidden-state probes
@@ -87,6 +96,10 @@ SCRIPT_FILES=(
 )
 
 SLURM_FILES=(
+  slurm/phase3_calibrate_mirror_noise.sbatch slurm/phase3_score_files.sbatch   # T1/T2
+  slurm/submit_seed_retrain.sh slurm/phase3_recurrence.sbatch      # Exp 2
+  slurm/phase3_minirocket.sbatch slurm/phase3_tkan_delay_heldout.sbatch   # Exp 3
+  slurm/phase3_equations.sbatch                                    # equations across seeds
   slurm/phase3_train.sbatch
   slurm/phase3_train_gpu.sbatch               # GPU + per-fold job array
   slurm/phase3_eval_heldout.sbatch            # held-out eval sweep, no retrain
@@ -112,6 +125,9 @@ SLURM_FILES=(
   slurm/phase3_activation_modes.sbatch        # U14-B, CPU-only
   slurm/phase3_comb_probe.sbatch              # comb confirmation, `standard` partition
   slurm/phase3_mode_ablation.sbatch           # U14-B step 8, 1+3k held-out evals per stratum
+  slurm/phase3_heldout_pruning.sbatch         # spec item B, 1+2 per fraction held-out evals
+  slurm/phase3_symbolic_substitution.sbatch   # spec item A, 15 held-out evals
+  slurm/phase3_comb_ablation.sbatch           # U15 s6, 1+3 held-out evals
 )
 
 # Builder inputs (Phase 2/2.5 tables; ~51 MB, unchanged run to run so rsync
@@ -126,6 +142,12 @@ DATA_FILES=(
 # Tests: only needed to run pytest on GL. Kept as an explicit list because
 # "which tests exist on GL" has silently drifted from "which tests exist" twice.
 TEST_FILES=(
+  tests/test_minirocket_scores.py tests/test_model_compare.py
+  tests/test_noise_probe.py tests/test_calibrate_mirror_noise.py tests/test_score_files.py
+  tests/test_recurrence.py tests/test_minirocket_baseline.py tests/test_delay_variants.py
+  tests/test_equation_terms.py tests/test_equations.py tests/test_equation_fit.py   # equations across seeds
+  tests/test_equation_runners.py tests/test_equation_dump.py tests/test_eval_path_check.py
+  tests/test_equations_analysis.py
   tests/conftest.py tests/_phase3_synth.py
   tests/test_phase3_synth.py tests/test_phase3_sequence.py
   tests/test_phase3_data_prep.py tests/test_phase3_splits.py
@@ -154,6 +176,9 @@ TEST_FILES=(
   tests/test_repair_counterfactual_manifest.py tests/test_canonicalise_runs.py
   tests/test_severity_mode_naming.py tests/test_comb.py
   tests/test_comb_phase3_cli.py tests/test_comb_probe_phase3_cli.py
+  tests/test_substitution.py tests/test_heldout_pruning.py
+  tests/test_symbolic_substitution_runner.py tests/test_runner_smoke_end_to_end.py
+  tests/test_mode_ablation.py tests/test_comb_ablation.py
 )
 
 # The renderer's TEMPLATE: render_whitebox_report.py reads it from docs/ by
@@ -162,6 +187,8 @@ TEST_FILES=(
 DOC_FILES=(docs/phase3_tkan/whitebox_analysis.md)
 ROOT_FILES=(pyproject.toml)
 CONFIG_FILES=(configs/phase3_tkan.yaml)
+# Which run is canonical per fold and arm; read by slurm/phase3_score_files.sbatch.
+RESULT_FILES=(results/phase3/RUNS_CANONICAL.json)
 # Removed 2026-08-11: rapidminer/outputs/phase2/mode_labels.csv has never
 # existed in this tree (not on disk, not in git history), and as an rsync source
 # it exited 23 -- which under `set -e` aborted the sync at that line and silently
@@ -178,7 +205,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
   for d in "${SRC_DIRS[@]}"; do echo "  $d/  (recursive mirror)"; done
   for f in "${PKG_FILES[@]}" "${SCRIPT_FILES[@]}" "${SLURM_FILES[@]}" \
            "${DATA_FILES[@]}" "${TEST_FILES[@]}" "${DOC_FILES[@]}" \
-           "${ROOT_FILES[@]}" "${CONFIG_FILES[@]}"; do
+           "${ROOT_FILES[@]}" "${CONFIG_FILES[@]}" "${RESULT_FILES[@]}"; do
     [[ -e "$f" ]] && echo "  $f" || echo "  $f   <-- MISSING LOCALLY"
   done
   exit 0
@@ -213,7 +240,8 @@ echo ">>> Master connection established and verified. No further 2FA needed."
 RSH="ssh -o ControlPath=$CTRL"
 # Quote -e "$RSH" so the whole "ssh -o ControlPath=..." stays one argument and
 # every rsync reuses the master connection (no extra Duo prompts).
-rs() { rsync -av --exclude=__pycache__ --exclude='*.pyc' -e "$RSH" "$@"; }
+RS_OPTS=()   # extra rsync flags for one call (set, then cleared)
+rs() { rsync -av --exclude=__pycache__ --exclude='*.pyc' ${RS_OPTS[@]+"${RS_OPTS[@]}"} -e "$RSH" "$@"; }
 
 # Send only the paths that exist, and say so about the ones that do not.
 # `set -e` plus a stale entry used to abort the whole sync mid-way, silently
@@ -249,6 +277,10 @@ rs_existing "${TEST_FILES[@]}"   "$REMOTE:$DEST/tests/"
 rs_existing "${DOC_FILES[@]}"    "$REMOTE:$DEST/docs/phase3_tkan/"
 rs_existing "${ROOT_FILES[@]}"   "$REMOTE:$DEST/"
 rs_existing "${CONFIG_FILES[@]}" "$REMOTE:$DEST/configs/"
+# GL's copy of RUNS_CANONICAL.json may be newer than ours: never overwrite it.
+RS_OPTS=(--ignore-existing)
+rs_existing "${RESULT_FILES[@]}" "$REMOTE:$DEST/results/phase3/"
+RS_OPTS=()
 
 echo
 echo "================================================================"

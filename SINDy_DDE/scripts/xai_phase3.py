@@ -204,6 +204,11 @@ def _load_model(
         **severity_kwargs,
     )
     model.load_state_dict(state_dict)
+    # ``pool`` is a forward-time op, not in the state_dict, so load_state_dict
+    # cannot catch a mismatch. Without this every checkpoint came back at the
+    # default pool=1 and was scored on a 4x longer recurrence than it trained on.
+    if preprocessing is not None:
+        model.pool = int(preprocessing.get("pool", 1))
     model.eval()
     return model
 

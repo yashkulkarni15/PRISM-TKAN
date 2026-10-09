@@ -1,16 +1,18 @@
-# PRI2M SINDy-DDE / Phase 2.5 Workspace
+# PRI2M SINDy-DDE / Phase 3 TKAN Workspace
 
 This is the active PRI2M research workspace. Run commands from this directory:
 
 ```bash
-cd /Users/yash/Downloads/PRI2M/SINDy_DDE
+cd SINDy_DDE
 ```
 
 On Great Lakes, the matching project root is:
 
 ```bash
-cd /nfs/turbo/coe-jaabell/PRI2M/SINDy_DDE
+cd /nfs/turbo/coe-jaabell/PRI2M
 ```
+
+(The `.../PRI2M/SINDy_DDE` subdirectory on Great Lakes is a stale copy; do not use it.)
 
 ## Layout
 
@@ -27,6 +29,12 @@ cd /nfs/turbo/coe-jaabell/PRI2M/SINDy_DDE
 
 ## Current Phase
 
-Phase 2.5 is the active bridge between spectral PSD/JS work and the future T-KAN-PINN. It computes multi-family noise metrics, calibrates clean/noisy mirror ladders, assigns signal modes, and prepares the filter/Pareto workflow.
+Phase 3 (TKAN) is active. The model is a temporal KAN that takes the tooth-pass delay τ as an input. Five-fold training is done, and so are the NAMRC paper experiments:
+- group and pairwise deletion of the delay edges,
+- seed-retrain recurrence,
+- the MiniROCKET comparison and delay-damage test,
+- equations across seeds.
 
-The current production next step is still the pooled mirror calibration over the full clean/noisy ladder on Great Lakes after the running extraction and metrics jobs finish.
+The results and the paper-figure script (`scripts/plot_namrc_figures.py`) are summarised in the top-level README. The full experiment log is `docs/phase3_tkan/PROGRESS.md`.
+
+Phases 1–2.5 (physics checks, PSD/JS spectral analysis, noise calibration and mode labelling) are complete. Their code remains under `src/pri2m/{physics,spectral,noise}` and the matching scripts.

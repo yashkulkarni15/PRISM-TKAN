@@ -6,8 +6,64 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 
-from pri2m.data.phase3_sequence import NormStats, Phase3SequenceDataset, collate_windows
+from pri2m.data.phase3_sequence import (
+    NormStats,
+    Phase3SequenceDataset,
+    WindowConfig,
+    collate_windows,
+)
+
+
+def batch_to_model_device(batch: dict, model) -> dict:
+    """Move a batch's tensors onto whatever device ``model`` currently sits on.
+
+    ``build_labeled_batch`` always returns CPU tensors, but a runner that scores
+    a held-out set first has already had its model moved: ``eval_heldout_phase3
+    .run`` calls ``model.to(dev)`` (``eval_heldout_phase3.py:170``) as a side
+    effect. The model is then on CUDA while the batch is not, and the next
+    ``model(batch)`` dies with "Expected all tensors to be on the same device".
+    That is how job 57252876 died on 2026-08-12, 13 minutes in.
+
+    The device is read from the model's own parameters rather than from a
+    ``--device`` flag, so this stays correct no matter what moved the model or
+    when. Non-tensor entries are passed through untouched.
+    """
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:  # a model with no parameters cannot have been moved
+        return batch
+    return {
+        k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+        for k, v in batch.items()
+    }
+
+
+def window_config_from_preprocessing(preprocessing: dict | None) -> WindowConfig:
+    """Recover the window geometry a checkpoint was built with.
+
+    ``build_labeled_batch``'s ``cfg`` is REQUIRED -- passing ``None`` reaches
+    ``Phase3SequenceDataset`` and dies with ``'NoneType' object has no attribute
+    'channels'``. That is how job 57251934 died on 2026-08-12, after the held-out
+    baseline had already scored cleanly.
+
+    Reading the geometry from the checkpoint's own ``preprocessing.json`` is
+    preferable to taking it from CLI defaults: a mismatch would silently analyse
+    windows of a different length or channel order than the network was trained
+    on, and nothing downstream would flag it. Falls back to
+    :class:`WindowConfig`'s defaults when a block is absent, which is what a
+    manifest predating that block means.
+    """
+    pre = preprocessing or {}
+    window = pre.get("window") or {}
+    channels = pre.get("channels")
+    defaults = WindowConfig()
+    return WindowConfig(
+        length=int(window.get("length", defaults.length)),
+        stride=int(window.get("stride", defaults.stride)),
+        channels=tuple(channels) if channels else defaults.channels,
+    )
 
 CHANNELS = ("xtpos", "ytpos", "Forcex", "Forcey")
 

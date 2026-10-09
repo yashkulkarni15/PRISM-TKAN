@@ -259,6 +259,14 @@ def _usable(row: dict) -> bool:
     )
 
 
+#: Public alias. The ablation in ``comb_ablation`` must exclude exactly the rows
+#: this reading excludes, and importing the predicate is the only way to
+#: guarantee the two cannot drift apart. Re-implementing it there is how the
+#: selection would quietly come to describe a different set of pairs than
+#: Section 2 reports.
+usable = _usable
+
+
 def _weighted_mean(values, weights) -> float | None:
     v, w = np.asarray(values, float), np.asarray(weights, float)
     keep = np.isfinite(v) & np.isfinite(w) & (w > 0)

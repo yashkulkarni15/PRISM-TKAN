@@ -29,9 +29,16 @@ from __future__ import annotations
 
 import contextlib
 
+import numpy as np
 import torch
 
-__all__ = ["resolve_kan", "zero_edges", "edges_are_zeroed", "ablation_verdict"]
+__all__ = ["resolve_kan", "zero_edges", "edges_are_zeroed", "ablation_verdict",
+           "combined_edge_sets", "pair_verdict", "all_gated_verdict"]
+
+# Label the merged modes are relabelled to. assign_to_prototypes only ever emits
+# labels >= 0, so -1 cannot collide with a real mode; combined_edge_sets still
+# refuses labels that already contain it rather than trusting that.
+_MERGED = -1
 
 
 def resolve_kan(model, kan_name: str):
@@ -155,4 +162,158 @@ def ablation_verdict(baseline_auc, mode_auc, random_matched_auc,
     out["claimable"] = bool(out["exceeds_floor"]
                             and out["beats_random_control"]
                             and out["beats_other_modes_control"])
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Exp 1b: deleting several modes at once
+#
+# One network (fold 4) has no single necessary cluster at k=3. "No cluster is
+# necessary" and "the clusters cover for each other" predict the same singles
+# and different pairs, so the only test that separates them deletes two at
+# once. The interaction term below is that test; it was fixed before any pair
+# was run (docs/superpowers/plans/2026-10-05-paper-closeout.md, "Exp 1b").
+# --------------------------------------------------------------------------- #
+def combined_edge_sets(norm_bundle: dict, labels, modes, *, seed: int,
+                       population: dict | None = None) -> dict:
+    """Edge sets for deleting several modes at once, with a matched random arm.
+
+    Relabels every edge in ``modes`` to one merged label and hands that to
+    :func:`~pri2m.xai.activation_modes.mode_edge_sets`, so the pair's random
+    control is drawn by exactly the machinery the single-mode arms used --
+    matched on count AND summed importance, from ``population`` -- rather than
+    by a second implementation that could drift from it.
+
+    ``other_modes_matched`` is whatever is left over: one cluster for a pair at
+    k=3, and empty when ``modes`` covers every label (the all-gated arm). The
+    runner does not score it; it is returned only because mode_edge_sets
+    returns it.
+
+    Raises on a mode that has no edges: deleting one cluster under a "pair"
+    label would be read as a pair result, which is worse than no result.
+    """
+    from pri2m.xai import activation_modes as AM
+
+    labels = np.asarray(labels)
+    wanted = sorted({int(m) for m in modes})
+    if not wanted:
+        raise ValueError("combined_edge_sets needs at least one mode")
+    present = {int(v) for v in labels.tolist()}
+    absent = [m for m in wanted if m not in present]
+    if absent:
+        raise ValueError(f"modes {absent} have no edges (present: {sorted(present)})")
+    if _MERGED in present:
+        raise ValueError(f"labels already use the merge sentinel {_MERGED}")
+    # np.where builds a new array, so the caller's labels -- which the
+    # single-mode arms are still indexed on -- are never touched.
+    merged = np.where(np.isin(labels, wanted), _MERGED, labels)
+    sets = AM.mode_edge_sets(norm_bundle, merged, mode=_MERGED, seed=int(seed),
+                             population=population)
+    sets["modes"] = wanted
+    return sets
+
+
+def _matched_deletion(baseline_auc, deleted_auc, random_matched_auc,
+                      floor: float) -> dict | None:
+    """Drop, random drop and claimability for one deletion vs its random arm.
+
+    The rule is ablation_verdict's minus the other-modes control: at k=3 a pair
+    leaves a single cluster, and the all-gated arm leaves none, so there is no
+    other-modes set to compare against. Returns ``None`` when any arm is
+    missing, so the caller can mark it UNDECIDED rather than False.
+    """
+    if any(a is None for a in (baseline_auc, deleted_auc, random_matched_auc)):
+        return None
+    base = float(baseline_auc)
+    drop = base - float(deleted_auc)
+    rdrop = base - float(random_matched_auc)
+    exceeds = bool(drop > float(floor))
+    beats = bool(drop - rdrop > float(floor))
+    return {"drop": drop, "random_matched_drop": rdrop, "exceeds_floor": exceeds,
+            "beats_random_control": beats, "claimable": bool(exceeds and beats)}
+
+
+def pair_verdict(baseline_auc, pair_auc, random_matched_auc,
+                 single_drops: dict | None, floor: float) -> dict:
+    """Judge a two-mode deletion, and whether the modes cover for each other.
+
+    Pre-committed reads (Exp 1b):
+
+    * ``claimable`` = drop > floor AND drop - random_drop > floor.
+    * ``interaction`` = pair drop - (sum of the single-mode drops).
+      ``super_additive`` above +floor (the clusters are redundant: each hides
+      the other's loss, the fold-4 hypothesis), ``sub_additive`` below -floor
+      (they overlap in what they do), else ``additive``.
+
+    Interaction is reported whether or not the pair is claimable -- it is a
+    measured quantity, and a super-additive pair that fails its random control
+    is itself informative. The fold-4 hypothesis needs BOTH.
+
+    A missing pair/random/baseline arm leaves everything ``None`` with
+    ``undecided_reason="missing_arm"``: never False. A missing single drop only
+    blocks the interaction (``"missing_single_drop"``); the pair's own arms
+    still decide claimability.
+    """
+    singles = dict(single_drops or {})
+    out = {
+        "baseline_auc": baseline_auc,
+        "pair_auc": pair_auc,
+        "random_matched_auc": random_matched_auc,
+        "single_drops": {str(k): v for k, v in singles.items()},
+        "floor": float(floor),
+        "pair_drop": None,
+        "random_matched_drop": None,
+        "exceeds_floor": None,
+        "beats_random_control": None,
+        "claimable": None,
+        "sum_single_drops": None,
+        "interaction": None,
+        "interaction_class": None,
+        "undecided_reason": None,
+    }
+    core = _matched_deletion(baseline_auc, pair_auc, random_matched_auc, floor)
+    if core is None:
+        out["undecided_reason"] = "missing_arm"
+        return out
+    out["pair_drop"] = core.pop("drop")
+    out.update(core)
+
+    if not singles or any(v is None for v in singles.values()):
+        out["undecided_reason"] = "missing_single_drop"
+        return out
+    total = float(sum(float(v) for v in singles.values()))
+    inter = out["pair_drop"] - total
+    out["sum_single_drops"] = total
+    out["interaction"] = inter
+    out["interaction_class"] = ("super_additive" if inter > float(floor) else
+                                "sub_additive" if inter < -float(floor) else
+                                "additive")
+    return out
+
+
+def all_gated_verdict(baseline_auc, all_auc, random_matched_auc,
+                      floor: float) -> dict:
+    """Every gated edge deleted, against its matched random arm. Reference only.
+
+    Same claimability rule as :func:`pair_verdict` and no interaction term: with
+    every mode removed there is no "sum of parts" the plan committed to reading.
+    """
+    out = {
+        "baseline_auc": baseline_auc,
+        "all_auc": all_auc,
+        "random_matched_auc": random_matched_auc,
+        "floor": float(floor),
+        "all_drop": None,
+        "random_matched_drop": None,
+        "exceeds_floor": None,
+        "beats_random_control": None,
+        "claimable": None,
+        "undecided_reason": None,
+    }
+    core = _matched_deletion(baseline_auc, all_auc, random_matched_auc, floor)
+    if core is None:
+        out["undecided_reason"] = "missing_arm"
+        return out
+    out["all_drop"] = core.pop("drop")
+    out.update(core)
     return out

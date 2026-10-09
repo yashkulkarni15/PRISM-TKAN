@@ -127,13 +127,18 @@ def _build_train_config(cfg_dict: dict, args: argparse.Namespace) -> TrainConfig
         else bool(cfg_dict.get("deterministic", False))
     )
     epochs = args.epochs if args.epochs is not None else int(cfg_dict.get("epochs", 20))
+    # ``is not None`` (not truthiness): ``--seed 0`` is a real request and must
+    # beat a YAML seed. The one value seeds the trainer's RNGs AND the fold
+    # loaders' shuffle generator (train_one_fold passes cfg.seed to both), and
+    # is recorded in summary.json's config block and preprocessing.json.
+    seed = args.seed if args.seed is not None else int(cfg_dict.get("seed", 0))
 
     return TrainConfig(
         model=model,
         epochs=epochs,
         lr=float(cfg_dict.get("lr", 1e-3)),
         batch_size=int(cfg_dict.get("batch_size", 32)),
-        seed=int(cfg_dict.get("seed", 0)),
+        seed=seed,
         window=window,
         hidden_size=int(cfg_dict.get("hidden_size", 64)),
         num_layers=int(cfg_dict.get("num_layers", 1)),
@@ -273,6 +278,16 @@ def main(argv: list[str] | None = None) -> int:
         "to be exported before the process starts, or the run refuses to begin. "
         "Default: config's `deterministic`, else off -- every validated run to "
         "date was produced with it off.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="RNG seed for initialisation, dropout and the training-loader "
+        "shuffle (default: config's `seed`, else 0). Exp 2 retrains the same "
+        "fold with new seeds to ask whether the necessary delay cluster recurs; "
+        "every run before it used seed 0, so the five original folds share one "
+        "initialisation.",
     )
     parser.add_argument("--smoke", action="store_true", help="Clamp epochs for a fast CI run.")
     args = parser.parse_args(argv)

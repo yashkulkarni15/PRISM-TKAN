@@ -183,7 +183,7 @@ def _cli_args(**overrides):
         model=None, fold=None, device=None, num_workers=None, compile=None,
         smoke=False, lr_schedule=None, warmup_epochs=None, grad_clip=None,
         optimizer=None, weight_decay=None, side_input=None, side_hidden=None,
-        severity_mode=None, deterministic=None, epochs=None,
+        severity_mode=None, deterministic=None, epochs=None, seed=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)

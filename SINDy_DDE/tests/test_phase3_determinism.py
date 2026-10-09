@@ -244,7 +244,7 @@ def _cli_args(**overrides):
         model=None, fold=None, device=None, num_workers=None, compile=None,
         smoke=False, lr_schedule=None, warmup_epochs=None, grad_clip=None,
         optimizer=None, weight_decay=None, side_input=None, side_hidden=None,
-        severity_mode=None, deterministic=None, epochs=None,
+        severity_mode=None, deterministic=None, epochs=None, seed=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -299,3 +299,64 @@ def test_build_train_config_cli_overrides_yaml_epochs():
     assert cfg.epochs == 5
     # Nothing else may move: same window geometry as the validated config.
     assert cfg.effective_window().length == cfg.window.length
+
+
+# -- --seed, so Exp 2 can retrain the same fold from a different initialisation #
+def test_build_train_config_seed_defaults_to_zero():
+    mod = _load_train_script_module()
+
+    cfg = mod._build_train_config({}, _cli_args())
+
+    assert cfg.seed == 0
+
+
+def test_build_train_config_seed_reads_yaml():
+    mod = _load_train_script_module()
+
+    cfg = mod._build_train_config({"seed": 7}, _cli_args())
+
+    assert cfg.seed == 7
+
+
+def test_build_train_config_cli_overrides_yaml_seed():
+    """The seed retrain must change ONLY the seed: same fold, same geometry."""
+    mod = _load_train_script_module()
+
+    cfg = mod._build_train_config({"seed": 0, "epochs": 20}, _cli_args(seed=3))
+
+    assert cfg.seed == 3
+    assert cfg.epochs == 20
+
+
+def test_build_train_config_cli_seed_zero_is_not_treated_as_unset():
+    """``--seed 0`` is a real value; a truthiness test would fall back to YAML."""
+    mod = _load_train_script_module()
+
+    cfg = mod._build_train_config({"seed": 5}, _cli_args(seed=0))
+
+    assert cfg.seed == 0
+
+
+def test_train_main_parses_seed_flag(monkeypatch, tmp_path):
+    """--seed reaches TrainConfig through main()'s parser, and absent it the
+    config resolves exactly as before (YAML seed)."""
+    mod = _load_train_script_module()
+    seen = []
+
+    def _fake_train(cfg, table, folds_json, npz_root, output_dir, tracking_uri=None):
+        seen.append(cfg.seed)
+        return {"ok": True}
+
+    monkeypatch.setattr(mod, "train_one_fold", _fake_train)
+    monkeypatch.setattr(mod, "load_config", lambda path=None: {"seed": 0})
+    monkeypatch.setattr(mod.pd, "read_csv", lambda path: None)
+    folds = tmp_path / "folds.json"
+    folds.write_text("{}")
+    base = [
+        "--npz-root", "x", "--table", "t.csv", "--folds-json", str(folds),
+        "--output-dir", str(tmp_path), "--mlflow-uri", "file:x",
+    ]
+
+    assert mod.main(base + ["--seed", "2"]) == 0
+    assert mod.main(base) == 0
+    assert seen == [2, 0]

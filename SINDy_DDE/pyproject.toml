@@ -30,6 +30,12 @@ phase3 = [
   "dice-ml",
   "matplotlib",
 ]
+# Exp 3 MiniROCKET comparator ONLY, in its own env (envs/prism_aeon). Kept out of
+# phase3 on purpose: aeon's numba forces numpy < 2.4, and installing it into the
+# prism env would downgrade the numpy every validated TKAN run used.
+minirocket = [
+  "aeon",
+]
 sigkan = [
   "iisignature",
 ]
